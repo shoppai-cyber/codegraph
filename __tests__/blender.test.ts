@@ -1135,4 +1135,128 @@ class VIEW3D_PT_remote_panel(bpy.types.Panel):
       expect(blenderResolver.resolve(makeRef({ referenceName: 'blender:idname:wm.nope' }), ctx)).toBeNull();
     });
   });
+
+  describe('extract() — review follow-ups (I-1 dotted class-attr, I-2 annotated register, M-7 keymap)', () => {
+    it('I-1: dotted module.Class.bl_idname operator arg links to the tail class', () => {
+      const result = extract(`
+import bpy
+
+from . import ops
+
+
+class CGB_PT_dotted(bpy.types.Panel):
+    bl_label = "Dotted"
+
+    def draw(self, context):
+        self.layout.operator(ops.CGB_OT_target.bl_idname)
+
+
+def register():
+    bpy.utils.register_class(CGB_PT_dotted)
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'BLENDER module register()',
+          'BLENDER register Panel CGB_PT_dotted',
+          'BLENDER Panel.draw CGB_PT_dotted.draw',
+          'BLENDER ui-operator-class-attr CGB_OT_target', // dotted path, tail class bound
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'function_ref:register',
+          'references:CGB_PT_dotted', // register site
+          'references:CGB_OT_target', // ops.CGB_OT_target.bl_idname -> tail class
+          'references:blender:host:CGB_PT_dotted.draw',
+        ].sort()
+      );
+    });
+
+    it('I-2: annotated def register() -> None: still emits the module entry-point node', () => {
+      const result = extract(`
+import bpy
+
+
+class CGB_OT_annot(bpy.types.Operator):
+    bl_idname = "wm.cgb_annot"
+    bl_label = "Annotated"
+
+    def execute(self, context):
+        bpy.ops.wm.cgb_annot()
+        return {'FINISHED'}
+
+
+classes = (
+    CGB_OT_annot,
+)
+
+
+def register() -> None:
+    for cls in classes:
+        bpy.utils.register_class(cls)
+
+
+def unregister() -> None:
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'BLENDER module register()',
+          'BLENDER module unregister()',
+          'BLENDER register Operator CGB_OT_annot',
+          'BLENDER Operator.execute CGB_OT_annot.execute',
+          'BLENDER bpy-ops wm.cgb_annot',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'function_ref:register',
+          'function_ref:unregister',
+          'references:CGB_OT_annot', // register site
+          'references:CGB_OT_annot', // bpy.ops call resolved to the in-file class
+          'references:blender:host:CGB_OT_annot.execute',
+        ].sort()
+      );
+    });
+
+    it('M-7: keymap_items.new(Class.bl_idname, ...) links to the class (regression guard)', () => {
+      const result = extract(`
+import bpy
+
+
+class CGB_OT_key(bpy.types.Operator):
+    bl_idname = "wm.cgb_key"
+    bl_label = "Keymap target"
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+
+addon_keymaps = []
+
+
+def register():
+    bpy.utils.register_class(CGB_OT_key)
+    km = bpy.context.window_manager.keyconfigs.addon.keymaps.new(name="Object Mode")
+    km.keymap_items.new(CGB_OT_key.bl_idname, 'A', 'PRESS')
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'BLENDER module register()',
+          'BLENDER register Operator CGB_OT_key',
+          'BLENDER Operator.execute CGB_OT_key.execute',
+          'BLENDER keymap-class-attr CGB_OT_key',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'function_ref:register',
+          'references:CGB_OT_key', // register site
+          'references:CGB_OT_key', // keymap_items.new(CGB_OT_key.bl_idname, ...)
+          'references:blender:host:CGB_OT_key.execute',
+        ].sort()
+      );
+    });
+  });
 });

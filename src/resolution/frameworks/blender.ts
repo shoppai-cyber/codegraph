@@ -507,7 +507,7 @@ function analyze(filePath: string, content: string): FrameworkExtractionResult {
   };
 
   // --- module entry points (catalogNotes.registrationSignals.module-register)
-  const entryRegex = /^def[ \t]+(register|unregister)[ \t]*\([ \t]*\)[ \t]*:/gm;
+  const entryRegex = /^def[ \t]+(register|unregister)[ \t]*\([ \t]*\)[ \t]*(?:->[^:\n]+)?[ \t]*:/gm;
   while ((m = entryRegex.exec(safe)) !== null) {
     const fn = m[1]!;
     const line = lineNumberAt(safe, m.index);
@@ -556,15 +556,19 @@ function analyze(filePath: string, content: string): FrameworkExtractionResult {
       emitIdnameLink(line, offset, matchLength, literal, source, validateOperator);
       return;
     }
-    const attr = arg.match(/^([A-Za-z_]\w*)\.bl_idname$/);
+    const attr = arg.match(/^([A-Za-z_][\w.]*)\.bl_idname$/);
     if (attr) {
+      // Bind the tail class name so module-qualified `pkg.mod.Class.bl_idname`
+      // links the same as a bare `Class.bl_idname` (mirrors emitCallable tail).
+      const cls = attr[1]!.split('.').pop()!;
+      if (!/^[A-Za-z_]\w*$/.test(cls)) return;
       const node = emitNode(
         line,
-        `${source}-class-attr:${attr[1]!}:${offset}`,
-        `BLENDER ${source}-class-attr ${attr[1]!}`,
+        `${source}-class-attr:${cls}:${offset}`,
+        `BLENDER ${source}-class-attr ${cls}`,
         matchLength
       );
-      references.push(makeRef(node.id, attr[1]!, 'references', line, filePath));
+      references.push(makeRef(node.id, cls, 'references', line, filePath));
     }
   };
 

@@ -81,3 +81,30 @@ in the AutoResearch repo):
   Blender file passes 29/29 inside the full run.
 - **Inertness:** `detect()` requires a real bpy import or `bl_info=` (a bare `bpy.` mention in a comment
   does not trigger), so non-Blender repos are unaffected.
+
+## r2.1 — post-review follow-up fixes (2026-07-03, independent review `APPROVE-WITH-NITS`)
+
+A codegraph-dogfooded review (findings in the AutoResearch repo `scratch/_cgb_review/FINDINGS.md`)
+returned **APPROVE-WITH-NITS**: 0 Critical, 0 false positives, all r1/r2 claims verified. Two
+Important **false-negatives** fixed here (TDD — failing tests written first, 29 → 32):
+
+- **I-1 — dotted `module.Class.bl_idname` link args** (`emitLinkArg`). The class-attr regex matched
+  only a single identifier, so `pkg.mod.Class.bl_idname` (common in multi-file add-ons) emitted
+  nothing. Now matches a dotted path and binds the **tail** class name (mirrors the callable-tail
+  handling). Fixes all string-link sites (operator/menu/keymap/gizmo/macro) at once — they share
+  `emitLinkArg`.
+- **I-2 — annotated `def register() -> None:` / `def unregister() -> None:`** (`entryRegex`). The
+  entry-point regex required the colon immediately after `)`, so a return annotation dropped the
+  `BLENDER module register()` entry node. Now tolerates an optional `-> …` return annotation.
+- **M-7 — test gap:** added a regression test for `keymap_items.new(Class.bl_idname, …)` (behavior
+  already correct; now locked).
+
+**Verification:** `npx vitest run __tests__/blender.test.ts` → **32 passed / 32**; `npm run build`
+exit 0; reinstalled globally; installed-binary smoke confirms both fixes emit the expected edges.
+
+**Deferred Minors (backlogged — AutoResearch `scratch/_cgb_review/MINORS-BACKLOG.md`):** M-1 multi-line
+`__annotations__` guard, M-2 unanchored macro/UI receiver regexes, M-3 built-in `bpy.ops`
+unresolved-node noise, M-4 ALL-CAPS constant admitted as class, M-5 detection on raw content, M-6
+escaped-quote literal, M-8 trailing-comma `register_class(X,)`. All edge cases; none affects the
+mainline patterns. **I-3** (work-item-6 cross-file host-callback ceiling) confirmed genuine, already
+documented above — no code change.
