@@ -15,6 +15,7 @@ import { svelteResolver } from './svelte';
 import { vueResolver } from './vue';
 import { astroResolver } from './astro';
 import { djangoResolver, flaskResolver, fastapiResolver } from './python';
+import { blenderResolver } from './blender';
 import { railsResolver } from './ruby';
 import { springResolver } from './java';
 import { playResolver } from './play';
@@ -46,6 +47,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   djangoResolver,
   flaskResolver,
   fastapiResolver,
+  // Blender add-ons — host-invoked registration/callback surfaces
+  blenderResolver,
   // Ruby
   railsResolver,
   // Java
@@ -134,6 +137,7 @@ export { svelteResolver } from './svelte';
 export { vueResolver } from './vue';
 export { astroResolver } from './astro';
 export { djangoResolver, flaskResolver, fastapiResolver } from './python';
+export { blenderResolver } from './blender';
 export { railsResolver } from './ruby';
 export { springResolver } from './java';
 export { playResolver } from './play';
