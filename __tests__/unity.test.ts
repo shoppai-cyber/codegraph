@@ -856,6 +856,203 @@ class Player : MonoBehaviour
     });
   });
 
+  describe('extract() — FishNet networking (Tier 2, gated)', () => {
+    it('emits NetworkBehaviour callbacks and MonoBehaviour-message union when the FishNet gate is open', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartNetwork() {}
+    public override void OnStartServer() {}
+    public override void OnStopClient() {}
+    void Update() {}
+    void Helper() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartNetwork Player.OnStartNetwork',
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY NetworkBehaviour.OnStopClient Player.OnStopClient',
+          'UNITY NetworkBehaviour.Update Player.Update',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Player.OnStartNetwork',
+          'references:unity:host:Player.OnStartServer',
+          'references:unity:host:Player.OnStopClient',
+          'references:unity:host:Player.Update',
+        ].sort()
+      );
+    });
+
+    it('emits nothing for a NetworkBehaviour class with no FishNet using', () => {
+      const result = extract(`
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    void Update() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when the competing Unity.Netcode stack is present instead', () => {
+      const result = extract(`
+using Unity.Netcode;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when both FishNet and a competing stack are imported (collision guard)', () => {
+      const netcode = extract(`
+using FishNet.Object;
+using Unity.Netcode;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(netcode).toEqual({ nodes: [], references: [] });
+
+      const mirror = extract(`
+using FishNet.Object;
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(mirror).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits RPC and prediction attribute entry points on a NetworkBehaviour-based class', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [ServerRpc] void CmdMove() {}
+    [ObserversRpc] void RpcMove() {}
+    [TargetRpc] void TargetMove() {}
+    [Replicate] void Move() {}
+    [Reconcile] void Recon() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY attribute ObserversRpc Player.RpcMove',
+          'UNITY attribute Reconcile Player.Recon',
+          'UNITY attribute Replicate Player.Move',
+          'UNITY attribute ServerRpc Player.CmdMove',
+          'UNITY attribute TargetRpc Player.TargetMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:method:Player.CmdMove',
+          'references:unity:method:Player.Move',
+          'references:unity:method:Player.Recon',
+          'references:unity:method:Player.RpcMove',
+          'references:unity:method:Player.TargetMove',
+        ].sort()
+      );
+    });
+
+    it('emits nothing for RPC attributes on a non-NetworkBehaviour class', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class PlainHelper
+{
+    [ServerRpc] void CmdMove() {}
+    [Replicate] void Move() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for the Server/Client guard attributes', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [Server] void ServerOnly() {}
+    [Client] void ClientOnly() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('follows same-file NetworkBehaviour chains but not cross-file chains', () => {
+      const sameFile = extract(`
+using FishNet.Object;
+
+class BaseNet : NetworkBehaviour {}
+class Child : BaseNet
+{
+    public override void OnStartServer() {}
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(nodeNames(sameFile)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute ServerRpc Child.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(sameFile)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.CmdMove',
+        ].sort()
+      );
+
+      const crossFile = extract(`
+using FishNet.Object;
+
+class Child : BaseNet
+{
+    public override void OnStartServer() {}
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(crossFile).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens the gate on a fully-qualified FishNet.Object.NetworkBehaviour base without a using', () => {
+      const result = extract(`
+class Player : FishNet.Object.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY attribute ServerRpc Player.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Player.OnStartServer',
+          'references:unity:method:Player.CmdMove',
+        ].sort()
+      );
+    });
+  });
+
   describe('detect(), claimsReference(), and resolve()', () => {
     it('detects Unity projects with strong markers and ignores bare using-only source', () => {
       expect(

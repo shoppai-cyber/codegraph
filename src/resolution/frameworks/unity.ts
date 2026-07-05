@@ -18,6 +18,7 @@ import invocationTable from './unity-invocation-table.json';
 
 interface HostBaseRule {
   hostInvokedMethods: string[];
+  includesMonoBehaviourMessages?: boolean;
   note?: string;
 }
 
@@ -32,6 +33,16 @@ interface TypeReferenceAttributeRule {
   attribute: string;
 }
 
+interface FishnetSection {
+  gate: {
+    requiresAnyUsingPrefix?: string[];
+    disqualifyingUsingPrefixes?: string[];
+    fullyQualifiedBaseAlternative?: string;
+  };
+  hostInvokedBases: Record<string, HostBaseRule>;
+  attributeEntryPoints: { methodAttributes: MethodAttributeRule[] };
+}
+
 interface InvocationTable {
   hostInvokedBases: Record<string, HostBaseRule | string>;
   serializationAttributes: { attributes: string[] };
@@ -40,6 +51,7 @@ interface InvocationTable {
     classAttributes: Array<{ attribute: string }>;
   };
   typeReferenceAttributes: { attributes: TypeReferenceAttributeRule[] };
+  fishnet?: FishnetSection;
 }
 
 interface ClassBlock {
@@ -89,6 +101,54 @@ const SERIALIZATION_ATTRIBUTES = new Set(TABLE.serializationAttributes.attribute
 const METHOD_ATTRIBUTES = TABLE.attributeEntryPoints.methodAttributes;
 const CLASS_ATTRIBUTES = new Set(TABLE.attributeEntryPoints.classAttributes.map((a) => a.attribute));
 const TYPE_REFERENCE_ATTRIBUTES = new Set(TABLE.typeReferenceAttributes.attributes.map((a) => a.attribute));
+
+// FishNet (Tier 2) — a GATED networking section. NetworkBehaviour is deliberately
+// NOT in the ungated HOST_BASES (the bare token collides with NGO and Mirror); its
+// rules fire only when fishnetGateOpen() passes for the file. NetworkBehaviour's host
+// method set unions the 10 FishNet callbacks with MonoBehaviour's messages, because
+// FishNet's `NetworkBehaviour : MonoBehaviour` chain is framework-guaranteed. The union
+// is materialised from the MonoBehaviour entry so that list stays the single source.
+const FISHNET = TABLE.fishnet;
+const MONO_MESSAGES = HOST_BASE_RULES['MonoBehaviour']?.hostInvokedMethods ?? [];
+
+const FISHNET_HOST_RULES: Record<string, HostBaseRule> = {};
+if (FISHNET) {
+  for (const [base, rule] of Object.entries(FISHNET.hostInvokedBases)) {
+    const methods = rule.includesMonoBehaviourMessages
+      ? Array.from(new Set([...rule.hostInvokedMethods, ...MONO_MESSAGES]))
+      : rule.hostInvokedMethods;
+    FISHNET_HOST_RULES[base] = { ...rule, hostInvokedMethods: methods };
+  }
+}
+const FISHNET_HOST_BASES = new Set(Object.keys(FISHNET_HOST_RULES));
+const FISHNET_METHOD_ATTRIBUTES = FISHNET?.attributeEntryPoints?.methodAttributes ?? [];
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function usingPrefixRegex(prefix: string): RegExp {
+  // Matches a real `using [static] <prefix>...;` directive with the prefix at a name boundary.
+  return new RegExp(`^\\s*using\\s+(?:static\\s+)?${escapeRegExp(prefix)}\\b`, 'm');
+}
+
+const FISHNET_REQUIRED_USING_RES = (FISHNET?.gate?.requiresAnyUsingPrefix ?? []).map(usingPrefixRegex);
+const FISHNET_DISQUALIFY_USING_RES = (FISHNET?.gate?.disqualifyingUsingPrefixes ?? []).map(usingPrefixRegex);
+const FISHNET_FQ_BASE_RE = FISHNET?.gate?.fullyQualifiedBaseAlternative
+  ? new RegExp(`\\b${escapeRegExp(FISHNET.gate.fullyQualifiedBaseAlternative)}\\b`)
+  : null;
+
+/**
+ * True when the per-file FishNet gate is open: a FishNet using (or a fully-qualified
+ * FishNet.Object.NetworkBehaviour base) is present AND no competing stack (Unity.Netcode
+ * or Mirror) is imported. Read from comment-stripped, string-masked source.
+ */
+function fishnetGateOpen(safe: string): boolean {
+  if (!FISHNET) return false;
+  if (FISHNET_DISQUALIFY_USING_RES.some((re) => re.test(safe))) return false;
+  if (FISHNET_REQUIRED_USING_RES.some((re) => re.test(safe))) return true;
+  return FISHNET_FQ_BASE_RE ? FISHNET_FQ_BASE_RE.test(safe) : false;
+}
 
 const HOST_REF_PREFIX = 'unity:host:';
 const FIELD_REF_PREFIX = 'unity:field:';
@@ -287,9 +347,11 @@ function parseAliases(content: string): Map<string, string> {
   return aliases;
 }
 
-function parseClassBlocks(content: string, filePath: string): ClassBlock[] {
+function parseClassBlocks(content: string, filePath: string): { classes: ClassBlock[]; fishnetActive: boolean } {
   const noComments = stripCommentsForRegex(content, 'csharp');
   const safe = maskStringLiterals(noComments);
+  const fishnetActive = fishnetGateOpen(safe);
+  const activeHostBases = fishnetActive ? new Set([...HOST_BASES, ...FISHNET_HOST_BASES]) : HOST_BASES;
   const aliases = parseAliases(safe);
   const classes: ClassBlock[] = [];
   const classRegex = /(?:\b(?:public|private|protected|internal|sealed|abstract|partial|static|new)\s+)*class\s+([A-Za-z_]\w*)(?:\s*:\s*([^{]+))?\s*\{/g;
@@ -314,7 +376,7 @@ function parseClassBlocks(content: string, filePath: string): ClassBlock[] {
 
   const directHostByName = new Map<string, string>();
   for (const cls of classes) {
-    const direct = cls.bases.find((b) => HOST_BASES.has(b));
+    const direct = cls.bases.find((b) => activeHostBases.has(b));
     if (direct) directHostByName.set(cls.name, direct);
   }
 
@@ -331,14 +393,15 @@ function parseClassBlocks(content: string, filePath: string): ClassBlock[] {
     }
   }
 
-  return classes.map((cls) => {
-    const direct = cls.bases.find((b) => HOST_BASES.has(b));
+  const resolved = classes.map((cls) => {
+    const direct = cls.bases.find((b) => activeHostBases.has(b));
     const chained = cls.bases.find((b) => directHostByName.has(b));
     return {
       ...cls,
       hostBase: direct || (chained ? directHostByName.get(chained)! : null),
     };
   });
+  return { classes: resolved, fishnetActive };
 }
 
 function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
@@ -681,14 +744,15 @@ function processClass(
   seenNodes: Set<string>,
   seenRefs: Set<string>,
   cls: ClassBlock,
-  originalContent: string
+  originalContent: string,
+  fishnetActive: boolean
 ): void {
   const methods = parseMethods(cls, originalContent);
   const fields = parseFields(cls, originalContent);
   const properties = parseProperties(cls, originalContent);
 
   if (cls.hostBase) {
-    const rule = HOST_BASE_RULES[cls.hostBase];
+    const rule = HOST_BASE_RULES[cls.hostBase] || (fishnetActive ? FISHNET_HOST_RULES[cls.hostBase] : undefined);
     if (rule) {
       const hostMethods = new Set(rule.hostInvokedMethods);
       for (const method of methods) {
@@ -739,6 +803,29 @@ function processClass(
         `UNITY attribute ${rule.attribute} ${cls.name}.${method.name}`,
         refs
       );
+    }
+  }
+
+  // FishNet RPC/prediction attribute entry points — gated: only on a class provably
+  // NetworkBehaviour-based in this file, and only while the file's FishNet gate is open.
+  if (fishnetActive && cls.hostBase && FISHNET_HOST_BASES.has(cls.hostBase)) {
+    for (const method of methods) {
+      if (!method.canEmit) continue;
+      for (const rule of FISHNET_METHOD_ATTRIBUTES) {
+        const attr = findAttribute(method.attributes, rule.attribute);
+        if (!attr) continue;
+        if (rule.requiresStatic && !method.isStatic) continue;
+        if (rule.requiresInstance && method.isStatic) continue;
+        pushNodeRef(
+          result,
+          seenNodes,
+          seenRefs,
+          cls.filePath,
+          method.line,
+          `UNITY attribute ${rule.attribute} ${cls.name}.${method.name}`,
+          [`${METHOD_REF_PREFIX}${cls.name}.${method.name}`]
+        );
+      }
     }
   }
 
@@ -903,9 +990,9 @@ export const unityResolver: FrameworkResolver = {
     const result: FrameworkExtractionResult = { nodes: [], references: [] };
     const seenNodes = new Set<string>();
     const seenRefs = new Set<string>();
-    const classes = parseClassBlocks(content, filePath);
+    const { classes, fishnetActive } = parseClassBlocks(content, filePath);
     for (const cls of classes) {
-      processClass(result, seenNodes, seenRefs, cls, content);
+      processClass(result, seenNodes, seenRefs, cls, content, fishnetActive);
     }
     return result;
   },
