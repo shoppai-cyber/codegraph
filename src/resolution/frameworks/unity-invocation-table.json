@@ -1,9 +1,9 @@
 {
   "$schema": "https://codegraph.dev/schemas/unity-invocation-table.v0.json",
   "name": "unity-runtime-invocation-table",
-  "version": "0.2.0",
-  "target": "Unity 2021 LTS – 6.x; runtime + editor C# scripting",
-  "status": "Fable-reviewed v1 scope. Consumed lists are grounded in the local Unity 6.5 corpus and FABLE-SCOPE-DECISIONS.md; pending rows are explicitly marked or quarantined. Runtime consumption must stay inside the consumed sections.",
+  "version": "0.3.0",
+  "target": "Unity 2021 LTS – 6.x; runtime + editor C# scripting; FishNet 4.x networking (Tier 2, gated)",
+  "status": "Fable-reviewed v1 scope plus the FishNet Tier-2 networking section. Consumed lists are grounded in the local Unity 6.5 corpus and FABLE-SCOPE-DECISIONS.md (Tier 1) and the FishNet 4.7.2 corpus verified against the validation project's 4.6.20 source (Tier 2, see resolver-facts/FISHNET-RESOLVER-FACTS.md); pending rows are explicitly marked or quarantined. Runtime consumption must stay inside the consumed sections.",
   "consumed": {
     "note": "Sections here are read by unity.ts at runtime; the fields consumed are named per section. Everything under catalogNotes is documentation-only provenance. This mirrors blender-invocation-table.json's consumed/catalogNotes split.",
     "detection": "project-level sufficient markers plus source evidence rules used by detect() to recognize a Unity project",
@@ -11,7 +11,8 @@
     "serializationAttributes": "attribute set → field kept live + its declared type emits a references edge",
     "attributeEntryPoints": "attribute → the decorated method/class is a host-invoked entry point (kept live); menu/path string captured where present",
     "typeReferenceAttributes": "attribute → typeof(X)/type argument emits a references edge to X",
-    "stringInvokedCallSites": "callsite API → its string-literal method-name argument links to a sibling method (references)"
+    "stringInvokedCallSites": "callsite API → its string-literal method-name argument links to a sibling method (references)",
+    "fishnet": "gated FishNet 4.x networking rules: fishnet.gate (per-file using-based gate), fishnet.hostInvokedBases.NetworkBehaviour.hostInvokedMethods (+includesMonoBehaviourMessages union), and fishnet.attributeEntryPoints.methodAttributes (RPC/prediction entry points). Every fishnet row only fires when fishnet.gate is open in that file."
   },
   "sourcePriority": [
     "kb/gamedev/unity (to be built — Unity Scripting API + Manual mirror)",
@@ -269,6 +270,72 @@
       { "id": "context-menu-item", "apiPattern": "[ContextMenuItem(label, \"MethodName\")] on a field", "argument": "second string literal or bare nameof(M)", "linksTo": "unique same-class method on the declaring host-based class", "referenceKind": "references" }
     ]
   },
+  "fishnet": {
+    "note": "FishNet (Fish-Networking) 4.x consumed rules — Tier 2. NetworkBehaviour, ServerRpc, and TargetRpc collide by name with Unity Netcode for GameObjects (NGO) and Mirror, so EVERY fishnet row is gated per file (see gate). Facts are corpus-verified against FishNet 4.7.2 and re-verified against the validation project's 4.6.20 source (stable since 4.0). Runtime consumption reads gate, hostInvokedBases.NetworkBehaviour.hostInvokedMethods (unioned with MonoBehaviour messages), and attributeEntryPoints.methodAttributes. Full provenance: resolver-facts/FISHNET-RESOLVER-FACTS.md.",
+    "gate": {
+      "note": "A fishnet row fires in a file ONLY when BOTH halves hold. EVIDENCE half: the file has a `using FishNet;` / `using FishNet.<...>;` directive, OR a class base written fully-qualified as `FishNet.Object.NetworkBehaviour`. EXCLUSION half: the file has NO `using Unity.Netcode<...>` and NO `using Mirror<...>` — either competing stack makes the colliding NetworkBehaviour / ServerRpc / TargetRpc tokens ambiguous, so emit nothing even when FishNet evidence is also present. Applied uniformly to every fishnet row (host bases and attribute entry points alike). Directive/base evidence is read from comment-stripped, string-masked source, so a commented or string-literal using never counts.",
+      "requiresAnyUsingPrefix": ["FishNet"],
+      "fullyQualifiedBaseAlternative": "FishNet.Object.NetworkBehaviour",
+      "disqualifyingUsingPrefixes": ["Unity.Netcode", "Mirror"]
+    },
+    "hostInvokedBases": {
+      "note": "NetworkBehaviour is a GATED host base (see gate) — deliberately NOT in the top-level ungated hostInvokedBases whitelist, because the bare `NetworkBehaviour` token is shared by NGO, Mirror, and FishNet. Its host-method set is the 10 public virtual FishNet lifecycle callbacks UNIONED with the full MonoBehaviour message set: FishNet's `NetworkBehaviour : MonoBehaviour` is a framework-guaranteed chain (verified in 4.6.20 source), so Update/Awake/OnTriggerEnter/etc. are engine-invoked on it too. The union is materialised by the resolver from the MonoBehaviour entry via includesMonoBehaviourMessages, so the MonoBehaviour list stays the single source of truth (no drift).",
+      "NetworkBehaviour": {
+        "hostInvokedMethods": [
+          "OnStartNetwork",
+          "OnStopNetwork",
+          "OnStartServer",
+          "OnStopServer",
+          "OnStartClient",
+          "OnStopClient",
+          "OnSpawnServer",
+          "OnDespawnServer",
+          "OnOwnershipServer",
+          "OnOwnershipClient"
+        ],
+        "includesMonoBehaviourMessages": true,
+        "detection": "base list includes NetworkBehaviour (short form under an open gate, or fully-qualified FishNet.Object.NetworkBehaviour); same-file base chains are allowed when proven in-file; cross-file base chains emit nothing — identical to the Tier-1 MonoBehaviour rule",
+        "note": "The 10 public virtual callbacks from FishNet 4.7.2 (corpus tier=free). Excludes the internal *_Internal variants and OnValidate (already a MonoBehaviour message, protected not public). OnSpawnServer/OnDespawnServer/OnOwnershipServer/OnOwnershipClient take a NetworkConnection argument; the resolver matches by name only."
+      }
+    },
+    "attributeEntryPoints": {
+      "note": "The decorated INSTANCE method is invoked by FishNet's networking/prediction layer, not by an in-code caller — entry-point liveness (self-reference only, no target). Requires the declaring class provably NetworkBehaviour-based in the SAME file AND the file gate open. Short and Attribute-suffixed forms match, same token rules as Tier-1. Static methods bearing these attributes emit nothing.",
+      "methodAttributes": [
+        { "attribute": "ServerRpc", "scope": "instance method", "invokedBy": "client→server remote call", "requiresInstance": true, "collidesWith": "Unity.Netcode ServerRpcAttribute (gated out by disqualifyingUsingPrefixes)" },
+        { "attribute": "ObserversRpc", "scope": "instance method", "invokedBy": "server→all-observers remote call", "requiresInstance": true },
+        { "attribute": "TargetRpc", "scope": "instance method", "invokedBy": "server→single-client remote call", "requiresInstance": true, "collidesWith": "Mirror TargetRpcAttribute (gated out by disqualifyingUsingPrefixes)" },
+        { "attribute": "Replicate", "scope": "instance method", "invokedBy": "client-side prediction input tick", "requiresInstance": true },
+        { "attribute": "Reconcile", "scope": "instance method", "invokedBy": "client-side prediction reconcile", "requiresInstance": true }
+      ],
+      "referenceKind": "entry-point liveness (no target); the RPC/prediction method is kept live via a self-reference"
+    },
+    "excludedRows": {
+      "note": "Present in FishNet 4.7.2/4.6.20 but deliberately NOT consumed as liveness rows. Recorded here with reasons per the emit-nothing policy.",
+      "guardAttributes": {
+        "rows": ["Server", "Client"],
+        "reason": "ServerAttribute/ClientAttribute are GUARD attributes ('Prevents this method from running if server/client is not active') — early-return wrappers around a normal method body, NOT framework entry points. They do not make a method host-invoked, so no liveness row.",
+        "corpusSummaries": {
+          "ServerAttribute": "Prevents a method from running if server is not active. Can only be used inside a NetworkBehaviour.",
+          "ClientAttribute": "Prevents this method from running if client is not active."
+        }
+      },
+      "legacySyncAttributes": {
+        "rows": ["SyncVar", "SyncObject"],
+        "reason": "SyncVarAttribute/SyncObjectAttribute are corpus is_obsolete=1 (legacy v3-style). Modern FishNet uses SyncVar<T>/SyncList<T> field TYPES with OnChange events, not attributes. Deferred unless a validation corpus shows real attribute usage.",
+        "corpusObsolete": true
+      },
+      "unifiedRpc": {
+        "rows": ["Rpc"],
+        "reason": "FishNet 4.x also ships a unified RpcAttribute ([Rpc] with a RunLocally/communication direction), corpus tier=free. Left deferred for v1: it is not in the maintainer-specified v1 attribute set and the bare `Rpc` token also collides with NGO's [Rpc] (SendTo...). Candidate for a later addition under the same gate."
+      }
+    },
+    "eventSubscriptions": {
+      "note": "SyncType OnChange handlers (`_health.OnChange += OnHealthChanged;`), TimeManager event handlers (`base.TimeManager.OnTick += Tm_OnTick;`), and RegisterBroadcast handlers (`clientManager.RegisterBroadcast<T>(OnBroadcast);`) are method-group references, NOT FishNet-specific dispatch. Investigation finding: codegraph's general C# function-as-value capture (#756, CSHARP_SPEC in src/extraction/function-ref.ts — assignment_expression `+=` RHS and bare-identifier call arguments) ALREADY captures these handlers and resolves them to same-file method nodes as `references` edges via matchFunctionRef. No FishNet-specific bridge is added in this phase; it would double-emit. Coverage bound: the handler must be a same-file method that survives the function-ref gate and resolves uniquely — cross-file handlers and non-self member-value receivers stay uncovered (deliberately, per emit-nothing).",
+      "resolverBehavior": "Emit nothing new; rely on the existing general C# function_ref mechanism.",
+      "syncTypesWithOnChange": ["SyncVar", "SyncList", "SyncDictionary", "SyncHashSet", "SyncTimer", "SyncStopwatch", "ComponentStateSync", "StructySync"],
+      "timeManagerEvents": ["OnTick", "OnPostTick", "OnPreTick", "OnUpdate", "OnLateUpdate", "OnFixedUpdate", "OnPostPhysicsSimulation", "OnPrePhysicsSimulation", "OnRoundTripTimeUpdated"]
+    }
+  },
   "catalogNotes": {
     "documentationOnly": true,
     "note": "Not read by unity.ts at runtime. Provenance, quarantine, deferrals, and false-positive guard record for behaviors hardcoded in the resolver.",
@@ -293,9 +360,10 @@
     },
     "deferredPackageAttributes": {
       "networking": {
-        "rows": ["ServerRpc", "ClientRpc", "Rpc", "Command", "TargetRpc", "SyncVar hook"],
-        "reason": "Package-specific and name-colliding across Netcode for GameObjects, Mirror, legacy UNet, and FishNet-style stacks.",
-        "futureGate": "Require package evidence such as using Unity.Netcode, using Mirror, FishNet usings, NetworkBehaviour base evidence, or manifest.json package entries; likely sibling-corpus resolvers."
+        "rows": ["ClientRpc", "Rpc", "Command", "SyncVar hook"],
+        "reason": "Netcode-for-GameObjects (NGO), Mirror, and legacy UNet attributes; package-specific and name-colliding. [ClientRpc]/[Rpc] (NGO + Mirror), [Command] (Mirror/UNet), and Mirror's [SyncVar(hook=...)] have no FishNet-gated home in v1.",
+        "graduated": "FishNet's ServerRpc, ObserversRpc, TargetRpc, Replicate, and Reconcile GRADUATED to the consumed top-level `fishnet` section, which fires only behind the per-file FishNet using-gate. NGO/Mirror ServerRpc/TargetRpc are still excluded here: the fishnet gate emits nothing in any file importing Unity.Netcode or Mirror.",
+        "futureGate": "For the still-deferred NGO/Mirror/UNet rows: require package evidence such as using Unity.Netcode or using Mirror plus their NetworkBehaviour base; likely sibling gated sections mirroring the fishnet one."
       },
       "tests": {
         "rows": ["Test", "UnityTest", "SetUp", "TearDown", "OneTimeSetUp", "OneTimeTearDown", "UnitySetUp", "UnityTearDown"],
