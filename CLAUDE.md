@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Fork note (shoppai-cyber):** This is Kyle's private fork. For the **active fork workstream + operating rules + delegation**, read **`AGENTS.md`** (repo root) first — it is the canonical router. Everything below remains authoritative for how codegraph itself works (architecture, build/test, the REQUIRED validation methodology, house rules).
+
 ## Project Overview
 
 CodeGraph is a local-first code intelligence library + CLI + MCP server. It parses any supported codebase with tree-sitter, stores symbols/edges/files in SQLite (FTS5), and exposes a knowledge graph to AI agents (Claude Code, Cursor, Codex CLI, opencode) over MCP. Per-project data lives in `.codegraph/`. Extraction is deterministic — derived from AST, not LLM-summarized.
