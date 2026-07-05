@@ -104,7 +104,10 @@ interface PrefabInstanceInfo {
   fileID: string;
   sourceGuid?: string;
   transformParentFileID: string; // m_TransformParent → parent transform
-  nameOverride?: string;
+  // Every m_Name override with the source-prefab-local id it targets. We keep
+  // ALL of them and apply NONE to the node name — which id is the source
+  // prefab's root GameObject is only knowable by reading that prefab.
+  nameOverrides: Array<{ target: string; value: string }>;
   fieldOverrideCount: number;
   addedComponentFileIDs: string[];
   startLine: number;
@@ -122,6 +125,10 @@ export class UnityAssetExtractor {
   private edges: Edge[] = [];
   private unresolvedReferences: UnresolvedReference[] = [];
   private errors: ExtractionError[] = [];
+  // De-dup guards: two serialized fields pointing at the same target must not
+  // emit the same edge/ref twice (keyed without line number).
+  private seenEdges = new Set<string>();
+  private seenRefs = new Set<string>();
 
   constructor(filePath: string, source: string) {
     this.filePath = filePath;
@@ -336,7 +343,13 @@ export class UnityAssetExtractor {
 
     const instanceNodeId = new Map<string, string>();
     for (const pi of prefabInstances.values()) {
-      const name = pi.nameOverride || 'PrefabInstance';
+      // Conservative, always-safe name. We cannot verify at extract time which
+      // (if any) m_Name override targets the source prefab's ROOT GameObject, so
+      // we never name the instance after an override — the source prefab is
+      // surfaced via the `unity-yaml:asset:<guid>` reference and the overrides
+      // are kept in the docstring. (Follow-up: a resolution-phase `postExtract`
+      // can safely name it from the source-prefab file stem.)
+      const name = 'PrefabInstance';
       const id = generateNodeId(this.filePath, 'component', name, pi.startLine);
       instanceNodeId.set(pi.fileID, id);
       this.nodes.push(
@@ -352,7 +365,7 @@ export class UnityAssetExtractor {
       if (!childNode) return;
       const parent = parentOf.get(hierId) ?? { kind: 'root' };
       const parentNode = parent.kind === 'root' ? undefined : hierNodeId(parent.id);
-      this.edges.push({ source: parentNode ?? fileNode.id, target: childNode, kind: 'contains' });
+      this.pushEdge(parentNode ?? fileNode.id, childNode, 'contains');
     };
     for (const goFileID of keptGO) emitContains(goFileID);
     for (const piFileID of keptInstance) emitContains(piFileID);
@@ -372,7 +385,7 @@ export class UnityAssetExtractor {
       if (!ownerNodeId) continue;
 
       if (mb.scriptGuid) {
-        this.addRef(ownerNodeId, `unity:script:${mb.scriptGuid}`, mb.startLine);
+        this.addRef(ownerNodeId, `unity-yaml:script:${mb.scriptGuid}`, mb.startLine);
       }
       this.emitFieldWires(mb, ownerNodeId, goNodeId, componentToGO, gameObjects, keptGO);
       this.emitPersistentCalls(mb, ownerNodeId);
@@ -382,10 +395,10 @@ export class UnityAssetExtractor {
     for (const pi of prefabInstances.values()) {
       const instNode = instanceNodeId.get(pi.fileID);
       if (!instNode) continue;
-      if (pi.sourceGuid) this.addRef(instNode, `unity:asset:${pi.sourceGuid}`, pi.startLine);
+      if (pi.sourceGuid) this.addRef(instNode, `unity-yaml:asset:${pi.sourceGuid}`, pi.startLine);
       for (const addedFileID of pi.addedComponentFileIDs) {
         const addedMb = monoBehaviours.get(addedFileID);
-        if (addedMb?.scriptGuid) this.addRef(instNode, `unity:script:${addedMb.scriptGuid}`, addedMb.startLine);
+        if (addedMb?.scriptGuid) this.addRef(instNode, `unity-yaml:script:${addedMb.scriptGuid}`, addedMb.startLine);
       }
     }
   }
@@ -417,7 +430,7 @@ export class UnityAssetExtractor {
 
       if (guid) {
         // Cross-file prefab / ScriptableObject / material reference.
-        this.addRef(ownerNodeId, `unity:asset:${guid}`, mb.startLine + i);
+        this.addRef(ownerNodeId, `unity-yaml:asset:${guid}`, mb.startLine + i);
         continue;
       }
       if (fileID === '0') continue;
@@ -427,7 +440,7 @@ export class UnityAssetExtractor {
       if (!targetGO || !keptGO.has(targetGO)) continue;
       const targetNode = goNodeId.get(targetGO);
       if (!targetNode || targetNode === ownerNodeId) continue;
-      this.edges.push({ source: ownerNodeId, target: targetNode, kind: 'references' });
+      this.pushEdge(ownerNodeId, targetNode, 'references');
     }
   }
 
@@ -450,7 +463,7 @@ export class UnityAssetExtractor {
       }
       const method = line.match(/m_MethodName:\s*(\S+)\s*$/);
       if (method) {
-        if (pendingGuid) this.addRef(ownerNodeId, `unity:method:${pendingGuid}:${method[1]}`, pendingLine);
+        if (pendingGuid) this.addRef(ownerNodeId, `unity-yaml:method:${pendingGuid}:${method[1]}`, pendingLine);
         pendingGuid = undefined;
       }
     }
@@ -463,7 +476,7 @@ export class UnityAssetExtractor {
   private parseGameObject(doc: UnityDoc): GameObjectInfo {
     return {
       fileID: doc.fileID,
-      name: this.topScalar(doc.body, 'm_Name') ?? '',
+      name: this.unquote(this.topScalar(doc.body, 'm_Name') ?? ''),
       isActive: (this.topScalar(doc.body, 'm_IsActive') ?? '1') === '1',
       tag: this.topScalar(doc.body, 'm_TagString'),
       layer: this.topScalar(doc.body, 'm_Layer'),
@@ -500,10 +513,15 @@ export class UnityAssetExtractor {
     // m_TransformParent lives under m_Modification; a plain topScalar scan finds
     // it regardless of the extra indent because we match on the key name.
     let transformParent = '0';
-    let nameOverride: string | undefined;
+    const nameOverrides: Array<{ target: string; value: string }> = [];
     let fieldOverrideCount = 0;
     const addedComponentFileIDs: string[] = [];
     let sourceGuid: string | undefined;
+    // The fileID of the most recent modification `target:` — a source-prefab-
+    // local id. Paired with the m_Name propertyPath below so each rename keeps
+    // the id of the object it targets (a root rename vs a child rename can only
+    // be told apart later, by reading the source prefab).
+    let lastTargetFileID = '0';
 
     for (let i = 0; i < doc.body.length; i++) {
       const line = doc.body[i]!;
@@ -517,14 +535,19 @@ export class UnityAssetExtractor {
         sourceGuid = src[1];
         continue;
       }
+      const tgt = line.match(/\btarget: \{fileID: (-?\d+)/);
+      if (tgt) {
+        lastTargetFileID = tgt[1]!;
+        continue;
+      }
       const prop = line.match(/^\s*propertyPath:\s*(\S+)\s*$/);
       if (prop) {
         const valueLine = doc.body[i + 1] ?? '';
         const val = valueLine.match(/^\s*value:\s*(.*)$/);
         if (prop[1] === 'm_Name' && val) {
-          // Multiple m_Name overrides can appear (nested renames); the root's is
-          // conventionally emitted last, so the last one wins.
-          nameOverride = val[1]!.trim();
+          // Record every m_Name override with the id it targets; deliberately do
+          // NOT pick one to name the instance root (see the node-naming note).
+          nameOverrides.push({ target: lastTargetFileID, value: this.unquote(val[1]!.trim()) });
         } else {
           fieldOverrideCount++;
         }
@@ -540,7 +563,7 @@ export class UnityAssetExtractor {
       fileID: doc.fileID,
       sourceGuid,
       transformParentFileID: transformParent,
-      nameOverride,
+      nameOverrides,
       fieldOverrideCount,
       addedComponentFileIDs,
       startLine: doc.startLine,
@@ -596,12 +619,28 @@ export class UnityAssetExtractor {
     return tail.trim() || undefined;
   }
 
+  /**
+   * Strip matching surrounding quotes from a Unity YAML scalar. Unity only
+   * quotes a name when it must (leading/trailing space, special chars); an
+   * unquoted value is returned unchanged. Double-quoted values unescape `\\`
+   * and `\"`; single-quoted values unescape the `''` pair.
+   */
+  private unquote(value: string): string {
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+      return value.slice(1, -1).replace(/\\(["\\])/g, '$1');
+    }
+    if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+      return value.slice(1, -1).replace(/''/g, "'");
+    }
+    return value;
+  }
+
   // -------------------------------------------------------------------------
   // Tokenizer + node factories
   // -------------------------------------------------------------------------
 
   private tokenize(): UnityDoc[] {
-    const lines = this.source.split('\n');
+    const lines = this.source.split(/\r?\n/);
     const docs: UnityDoc[] = [];
     const header = /^--- !u!(\d+) &(\d+)( stripped)?/;
     let current: UnityDoc | null = null;
@@ -635,7 +674,7 @@ export class UnityAssetExtractor {
   }
 
   private createFileNode(): Node {
-    const lines = this.source.split('\n');
+    const lines = this.source.split(/\r?\n/);
     const id = generateNodeId(this.filePath, 'file', this.filePath, 1);
     const fileNode: Node = {
       id,
@@ -682,6 +721,10 @@ export class UnityAssetExtractor {
 
   private instanceDocstring(pi: PrefabInstanceInfo, prunedDescendants: number): string {
     const parts = ['prefabInstance'];
+    if (pi.nameOverrides.length > 0) {
+      // Kept as metadata (target-id:value), never applied to the node name.
+      parts.push(`nameOverrides=${pi.nameOverrides.map((o) => `${o.target}:${o.value}`).join(',')}`);
+    }
     if (pi.fieldOverrideCount > 0) parts.push(`overrides=${pi.fieldOverrideCount}`);
     if (pi.addedComponentFileIDs.length > 0) parts.push(`addedComponents=${pi.addedComponentFileIDs.length}`);
     if (prunedDescendants > 0) parts.push(`decorationChildren=${prunedDescendants}`);
@@ -689,6 +732,9 @@ export class UnityAssetExtractor {
   }
 
   private addRef(fromNodeId: string, referenceName: string, line: number): void {
+    const key = `${fromNodeId} ${referenceName}`;
+    if (this.seenRefs.has(key)) return;
+    this.seenRefs.add(key);
     this.unresolvedReferences.push({
       fromNodeId,
       referenceName,
@@ -696,5 +742,17 @@ export class UnityAssetExtractor {
       line,
       column: 0,
     });
+  }
+
+  /**
+   * Push an edge de-duplicated by (source, target, kind). Two serialized fields
+   * that point at the same target — or a containment reached two ways — must not
+   * emit the same edge twice.
+   */
+  private pushEdge(source: string, target: string, kind: Edge['kind']): void {
+    const key = `${source} ${target} ${kind}`;
+    if (this.seenEdges.has(key)) return;
+    this.seenEdges.add(key);
+    this.edges.push({ source, target, kind });
   }
 }

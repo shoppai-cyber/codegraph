@@ -70,6 +70,36 @@ function nodeByName(result: ExtractionResult, name: string): Node | undefined {
   return result.nodes.find((n) => n.name === name);
 }
 
+/**
+ * A stable projection of an extraction result for cross-run equality. Excludes
+ * the volatile `updatedAt` timestamp; every id-bearing field is derived from
+ * file path + kind + name + line (deterministic), so an LF vs CRLF run of the
+ * same content must produce an identical fingerprint.
+ */
+function fingerprint(result: ExtractionResult) {
+  const byStr = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return {
+    nodes: result.nodes
+      .map((n) => ({
+        id: n.id,
+        kind: n.kind,
+        name: n.name,
+        qualifiedName: n.qualifiedName,
+        startLine: n.startLine,
+        endLine: n.endLine,
+        signature: n.signature ?? null,
+        docstring: n.docstring ?? null,
+      }))
+      .sort((a, b) => byStr(a.id, b.id)),
+    edges: result.edges
+      .map((e) => ({ source: e.source, target: e.target, kind: e.kind }))
+      .sort((a, b) => byStr(a.source + a.target + a.kind, b.source + b.target + b.kind)),
+    refs: result.unresolvedReferences
+      .map((r) => ({ name: r.referenceName, kind: r.referenceKind, line: r.line }))
+      .sort((a, b) => byStr(a.name, b.name)),
+  };
+}
+
 // A minimal but structurally-real Unity YAML header.
 const HEADER = '%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:';
 
@@ -151,7 +181,7 @@ MonoBehaviour:
 
     expect(nodeNames(result)).toEqual(['Coin', 'Coin.prefab']);
     expect(edgePairs(result)).toEqual(['contains:Coin.prefab->Coin']);
-    expect(refNames(result)).toEqual([`references:unity:script:${GUID.coinScript}`]);
+    expect(refNames(result)).toEqual([`references:unity-yaml:script:${GUID.coinScript}`]);
 
     const coin = nodeByName(result, 'Coin')!;
     expect(coin.kind).toBe('component');
@@ -162,6 +192,38 @@ MonoBehaviour:
 
     const file = nodeByName(result, 'Coin.prefab')!;
     expect(file.kind).toBe('file');
+  });
+
+  it('CRLF and LF checkouts produce byte-identical nodes, edges, and refs', () => {
+    // A Windows checkout (or `* text=auto` normalization) can deliver CRLF; the
+    // extractor must strip the trailing \r so every captured scalar and the graph
+    // it produces are identical to the LF form.
+    const lf = `${HEADER}
+--- !u!1 &100
+GameObject:
+  m_Component:
+  - component: {fileID: 200}
+  - component: {fileID: 300}
+  m_Name: Coin
+  m_IsActive: 1
+--- !u!4 &200
+Transform:
+  m_GameObject: {fileID: 100}
+  m_Father: {fileID: 0}
+--- !u!114 &300
+MonoBehaviour:
+  m_GameObject: {fileID: 100}
+  m_Script: {fileID: 11500000, guid: ${GUID.coinScript}, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::Coin
+`;
+    const crlf = lf.replace(/\n/g, '\r\n');
+    const a = extract(lf, 'Assets/prefabs/Coin.prefab');
+    const b = extract(crlf, 'Assets/prefabs/Coin.prefab');
+
+    expect(fingerprint(b)).toEqual(fingerprint(a));
+    // Guard against "identical because both are empty".
+    expect(nodeNames(a)).toEqual(['Coin', 'Coin.prefab']);
+    expect(refNames(a)).toEqual([`references:unity-yaml:script:${GUID.coinScript}`]);
   });
 
   it('hierarchy: a script-less ancestor is kept for containment; pure decoration is pruned to a summary', () => {
@@ -247,7 +309,7 @@ Transform:
       'contains:Game.unity->Level',
       'contains:Level->Player',
     ]);
-    expect(refNames(result)).toEqual([`references:unity:script:${GUID.playerController}`]);
+    expect(refNames(result)).toEqual([`references:unity-yaml:script:${GUID.playerController}`]);
 
     // The pruned decoration subtree is summarized on its nearest kept ancestor,
     // never expanded into nodes (the 300-bone-rig explosion guard).
@@ -257,7 +319,7 @@ Transform:
     expect(nodeByName(result, 'Bone_A')).toBeUndefined();
   });
 
-  it('PrefabInstance: m_Name override renames the node; source prefab is referenced', () => {
+  it('PrefabInstance: m_Name override is kept as metadata, never applied to the node name; source prefab is referenced', () => {
     const src = `${HEADER}
 --- !u!1 &1
 GameObject:
@@ -285,16 +347,56 @@ PrefabInstance:
 `;
     const result = extract(src, 'Assets/Scenes/Game.unity');
 
-    // The instance carries the overridden name, not the source's.
-    expect(nodeNames(result)).toContain('BonusCoin');
+    // The instance is named conservatively — we cannot prove the m_Name override
+    // targets the source prefab's root, so it is NOT used as the node name.
+    expect(nodeNames(result)).toContain('PrefabInstance');
+    expect(nodeNames(result)).not.toContain('BonusCoin');
     expect(nodeNames(result)).not.toContain('Coin');
     // Nested under its transform-parent (Level), which is kept as an ancestor.
-    expect(edgePairs(result)).toContain('contains:Level->BonusCoin');
-    // Source prefab is referenced by GUID.
-    expect(refNames(result)).toContain(`references:unity:asset:${GUID.coinScript}`);
+    expect(edgePairs(result)).toContain('contains:Level->PrefabInstance');
+    // Source prefab is referenced by GUID — the instance's identity is carried
+    // by this edge, not by a guessed name.
+    expect(refNames(result)).toContain(`references:unity-yaml:asset:${GUID.coinScript}`);
 
-    const bonus = nodeByName(result, 'BonusCoin')!;
-    expect(bonus.kind).toBe('component');
+    // The override is preserved as metadata (with the id it targets), never lost.
+    const inst = nodeByName(result, 'PrefabInstance')!;
+    expect(inst.kind).toBe('component');
+    expect(inst.docstring ?? '').toContain('BonusCoin');
+    expect(inst.docstring ?? '').toContain('555');
+  });
+
+  it('PrefabInstance with only a child renamed: the instance root is NOT named after the child override', () => {
+    // The override targets some object inside the source prefab; at extract time
+    // we cannot prove it is the root, so the instance node is never named "Torso".
+    // This is the failure the conservative naming rule exists to prevent.
+    const src = `${HEADER}
+--- !u!1 &1
+GameObject:
+  m_Component:
+  - component: {fileID: 2}
+  m_Name: Level
+--- !u!4 &2
+Transform:
+  m_GameObject: {fileID: 1}
+  m_Father: {fileID: 0}
+--- !u!1001 &900
+PrefabInstance:
+  m_Modification:
+    m_TransformParent: {fileID: 2}
+    m_Modifications:
+    - target: {fileID: 123456, guid: ${GUID.enemyPrefab}, type: 3}
+      propertyPath: m_Name
+      value: Torso
+      objectReference: {fileID: 0}
+  m_SourcePrefab: {fileID: 100100000, guid: ${GUID.enemyPrefab}, type: 3}
+`;
+    const result = extract(src, 'Assets/Scenes/Game.unity');
+
+    expect(nodeNames(result)).not.toContain('Torso');
+    expect(nodeNames(result)).toContain('PrefabInstance');
+    // Still preserved as metadata (target-id:value), just never applied.
+    const inst = nodeByName(result, 'PrefabInstance')!;
+    expect(inst.docstring ?? '').toContain('123456:Torso');
   });
 
   it('m_AddedComponents: an added script component emits a script ref from the instance', () => {
@@ -329,8 +431,8 @@ MonoBehaviour:
     const result = extract(src, 'Assets/prefabs/Combo.prefab');
 
     // Both the source-prefab ref and the added-component script ref surface.
-    expect(refNames(result)).toContain(`references:unity:asset:${GUID.weaponPrefab}`);
-    expect(refNames(result)).toContain(`references:unity:script:${GUID.enemyAI}`);
+    expect(refNames(result)).toContain(`references:unity-yaml:asset:${GUID.weaponPrefab}`);
+    expect(refNames(result)).toContain(`references:unity-yaml:script:${GUID.enemyAI}`);
   });
 
   it('nested prefab (Unity 6.5 direct form): child PrefabInstance node + source ref, nested under its holder', () => {
@@ -377,15 +479,17 @@ PrefabInstance:
 `;
     const result = extract(src, 'Assets/prefabs/Enemy.prefab');
 
-    expect(nodeNames(result)).toEqual(['Enemy', 'Enemy.prefab', 'Weapon', 'WeaponHolder'].sort());
+    // The nested instance is named conservatively ("PrefabInstance"), not from
+    // its m_Name override — its identity is carried by the source-prefab ref.
+    expect(nodeNames(result)).toEqual(['Enemy', 'Enemy.prefab', 'PrefabInstance', 'WeaponHolder'].sort());
     expect(edgePairs(result)).toEqual([
       'contains:Enemy.prefab->Enemy',
       'contains:Enemy->WeaponHolder',
-      'contains:WeaponHolder->Weapon',
+      'contains:WeaponHolder->PrefabInstance',
     ].sort());
     expect(refNames(result)).toEqual([
-      `references:unity:asset:${GUID.weaponPrefab}`,
-      `references:unity:script:${GUID.enemyAI}`,
+      `references:unity-yaml:asset:${GUID.weaponPrefab}`,
+      `references:unity-yaml:script:${GUID.enemyAI}`,
     ].sort());
   });
 
@@ -439,16 +543,17 @@ Transform:
 `;
     const result = extract(src, 'Assets/prefabs/Enemy.prefab');
 
-    // Same graph as the direct form — the stripped stub must not become a node.
-    expect(nodeNames(result)).toEqual(['Enemy', 'Enemy.prefab', 'Weapon', 'WeaponHolder'].sort());
+    // Same graph as the direct form — the stripped stub must not become a node,
+    // and the instance is named conservatively ("PrefabInstance").
+    expect(nodeNames(result)).toEqual(['Enemy', 'Enemy.prefab', 'PrefabInstance', 'WeaponHolder'].sort());
     expect(edgePairs(result)).toEqual([
       'contains:Enemy.prefab->Enemy',
       'contains:Enemy->WeaponHolder',
-      'contains:WeaponHolder->Weapon',
+      'contains:WeaponHolder->PrefabInstance',
     ].sort());
     expect(refNames(result)).toEqual([
-      `references:unity:asset:${GUID.weaponPrefab}`,
-      `references:unity:script:${GUID.enemyAI}`,
+      `references:unity-yaml:asset:${GUID.weaponPrefab}`,
+      `references:unity-yaml:script:${GUID.enemyAI}`,
     ].sort());
   });
 
@@ -494,9 +599,49 @@ MonoBehaviour:
     expect(edgePairs(result)).toContain('references:Main Camera->Player');
     // Both GameObjects carry their own script refs.
     expect(refNames(result)).toEqual([
-      `references:unity:script:${GUID.cameraFollow}`,
-      `references:unity:script:${GUID.playerController}`,
+      `references:unity-yaml:script:${GUID.cameraFollow}`,
+      `references:unity-yaml:script:${GUID.playerController}`,
     ].sort());
+  });
+
+  it('scene-object field wire to a decoration-pruned target emits nothing (never fabricates the target node)', () => {
+    // Scripted "Watcher" has a field pointing at a plain decoration GameObject
+    // that carries no script and is nobody's scripted ancestor, so it has no
+    // node. The wire has nothing to point at and is dropped — we do NOT invent a
+    // "Decoration" node just to satisfy the reference.
+    const src = `${HEADER}
+--- !u!1 &100
+GameObject:
+  m_Component:
+  - component: {fileID: 101}
+  - component: {fileID: 102}
+  m_Name: Watcher
+--- !u!4 &101
+Transform:
+  m_GameObject: {fileID: 100}
+  m_Father: {fileID: 0}
+--- !u!114 &102
+MonoBehaviour:
+  m_GameObject: {fileID: 100}
+  m_Script: {fileID: 11500000, guid: ${GUID.cameraFollow}, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::CameraFollow
+  target: {fileID: 201}
+--- !u!1 &200
+GameObject:
+  m_Component:
+  - component: {fileID: 201}
+  m_Name: Decoration
+--- !u!4 &201
+Transform:
+  m_GameObject: {fileID: 200}
+  m_Father: {fileID: 0}
+`;
+    const result = extract(src, 'Assets/Scenes/Game.unity');
+
+    // Watcher is a node (scripted); Decoration is pruned; no references edge.
+    expect(nodeNames(result)).toEqual(['Game.unity', 'Watcher']);
+    expect(nodeByName(result, 'Decoration')).toBeUndefined();
+    expect(edgePairs(result).some((e) => e.startsWith('references:'))).toBe(false);
   });
 
   it('prefab-asset field wire: a serialized {fileID, guid} field → cross-file asset ref', () => {
@@ -522,8 +667,8 @@ MonoBehaviour:
     const result = extract(src, 'Assets/Scenes/Game.unity');
 
     expect(refNames(result)).toEqual([
-      `references:unity:asset:${GUID.enemyPrefab}`,
-      `references:unity:script:${GUID.enemySpawner}`,
+      `references:unity-yaml:asset:${GUID.enemyPrefab}`,
+      `references:unity-yaml:script:${GUID.enemySpawner}`,
     ].sort());
   });
 
@@ -558,7 +703,41 @@ MonoBehaviour:
 `;
     const result = extract(src, 'Assets/Scenes/Game.unity');
 
-    expect(refNames(result)).toContain(`references:unity:method:${GUID.enemySpawner}:AddScore`);
+    expect(refNames(result)).toContain(`references:unity-yaml:method:${GUID.enemySpawner}:AddScore`);
+  });
+
+  it('UnityEvent persistent call whose m_Target has no GUID (scene-object target) emits no method ref', () => {
+    // A persistent call targeting a scene object carries only a fileID — the
+    // declaring type isn't knowable at extract time, so no method ref is
+    // fabricated (a missed edge beats a guessed one).
+    const src = `${HEADER}
+--- !u!1 &100
+GameObject:
+  m_Component:
+  - component: {fileID: 101}
+  - component: {fileID: 102}
+  m_Name: ScoreButton
+--- !u!4 &101
+Transform:
+  m_GameObject: {fileID: 100}
+  m_Father: {fileID: 0}
+--- !u!114 &102
+MonoBehaviour:
+  m_GameObject: {fileID: 100}
+  m_Script: {fileID: 11500000, guid: ${GUID.cameraFollow}, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::CameraFollow
+  onClick:
+    m_PersistentCalls:
+      m_Calls:
+      - m_Target: {fileID: 5678}
+        m_MethodName: AddScore
+        m_Mode: 1
+`;
+    const result = extract(src, 'Assets/Scenes/Game.unity');
+
+    // The script ref is still emitted; no method ref at all.
+    expect(refNames(result).some((r) => r.includes(':method:'))).toBe(false);
+    expect(refNames(result)).toContain(`references:unity-yaml:script:${GUID.cameraFollow}`);
   });
 
   it('decoration-only prefab: emits a file node (so it is a resolvable asset target) but no GameObject nodes', () => {
@@ -636,7 +815,7 @@ MonoBehaviour:
     // A ScriptableObject has no GameObject hierarchy; just the file node and the
     // MonoBehaviour's script link.
     expect(nodeNames(result)).toEqual(['SpawnConfig.asset']);
-    expect(refNames(result)).toEqual([`references:unity:script:${GUID.enemySpawner}`]);
+    expect(refNames(result)).toEqual([`references:unity-yaml:script:${GUID.enemySpawner}`]);
   });
 });
 
@@ -649,12 +828,17 @@ describe('unityAssetResolver', () => {
     expect(getFrameworkResolver('unity-assets')).toBe(unityAssetResolver);
   });
 
-  it('claimsReference only for unity: asset/script/method reference names', () => {
-    expect(unityAssetResolver.claimsReference!(`unity:script:${GUID.coinScript}`)).toBe(true);
-    expect(unityAssetResolver.claimsReference!(`unity:asset:${GUID.enemyPrefab}`)).toBe(true);
-    expect(unityAssetResolver.claimsReference!(`unity:method:${GUID.enemySpawner}:AddScore`)).toBe(true);
+  it('claimsReference only for its own unity-yaml: prefixes, never the C# resolver ones', () => {
+    expect(unityAssetResolver.claimsReference!(`unity-yaml:script:${GUID.coinScript}`)).toBe(true);
+    expect(unityAssetResolver.claimsReference!(`unity-yaml:asset:${GUID.enemyPrefab}`)).toBe(true);
+    expect(unityAssetResolver.claimsReference!(`unity-yaml:method:${GUID.enemySpawner}:AddScore`)).toBe(true);
     expect(unityAssetResolver.claimsReference!('SomeClass')).toBe(false);
+    // The C# Unity resolver owns unity:host: / unity:field: / unity:method: — the
+    // YAML resolver must NOT claim any of them (finding 4: the method form used to
+    // collide, disambiguated only by the language guard).
     expect(unityAssetResolver.claimsReference!('unity:host:Player.Update')).toBe(false);
+    expect(unityAssetResolver.claimsReference!('unity:field:Player.health')).toBe(false);
+    expect(unityAssetResolver.claimsReference!('unity:method:Player.Move')).toBe(false);
   });
 
   it('detect() is true for a Unity project and false otherwise', () => {
@@ -667,7 +851,7 @@ describe('unityAssetResolver', () => {
     expect(unityAssetResolver.detect(notUnity)).toBe(false);
   });
 
-  it('resolves unity:script:<guid> to the primary class node via the sibling .meta GUID map', () => {
+  it('resolves unity-yaml:script:<guid> to the primary class node via the sibling .meta GUID map', () => {
     const coinClass = makeSymbol({
       id: 'class:coin',
       kind: 'class',
@@ -687,13 +871,13 @@ describe('unityAssetResolver', () => {
     });
 
     const resolved = unityAssetResolver.resolve(
-      makeRef({ referenceName: `unity:script:${GUID.coinScript}` }),
+      makeRef({ referenceName: `unity-yaml:script:${GUID.coinScript}` }),
       ctx
     );
     expect(resolved?.targetNodeId).toBe('class:coin');
   });
 
-  it('resolves unity:asset:<guid> to the prefab file node', () => {
+  it('resolves unity-yaml:asset:<guid> to the prefab file node', () => {
     const prefabFile = makeSymbol({
       id: 'file:enemy-prefab',
       kind: 'file',
@@ -711,13 +895,13 @@ describe('unityAssetResolver', () => {
     });
 
     const resolved = unityAssetResolver.resolve(
-      makeRef({ referenceName: `unity:asset:${GUID.enemyPrefab}` }),
+      makeRef({ referenceName: `unity-yaml:asset:${GUID.enemyPrefab}` }),
       ctx
     );
     expect(resolved?.targetNodeId).toBe('file:enemy-prefab');
   });
 
-  it('resolves unity:method:<guid>:<name> to the uniquely-named method node', () => {
+  it('resolves unity-yaml:method:<guid>:<name> to the uniquely-named method node', () => {
     const method = makeSymbol({
       id: 'method:addscore',
       kind: 'method',
@@ -734,7 +918,7 @@ describe('unityAssetResolver', () => {
     });
 
     const resolved = unityAssetResolver.resolve(
-      makeRef({ referenceName: `unity:method:${GUID.enemySpawner}:AddScore` }),
+      makeRef({ referenceName: `unity-yaml:method:${GUID.enemySpawner}:AddScore` }),
       ctx
     );
     expect(resolved?.targetNodeId).toBe('method:addscore');
@@ -749,7 +933,7 @@ describe('unityAssetResolver', () => {
     });
     // A URP package script GUID that isn't in the indexed project.
     const resolved = unityAssetResolver.resolve(
-      makeRef({ referenceName: 'unity:script:474bcb49853aa07438625e644c072ee6' }),
+      makeRef({ referenceName: 'unity-yaml:script:474bcb49853aa07438625e644c072ee6' }),
       ctx
     );
     expect(resolved).toBeNull();
@@ -766,7 +950,7 @@ describe('unityAssetResolver', () => {
       getNodesInFile: (p) => (p === 'Assets/Scripts/Coin.cs' ? [a, b] : []),
     });
     const resolved = unityAssetResolver.resolve(
-      makeRef({ referenceName: `unity:script:${GUID.coinScript}` }),
+      makeRef({ referenceName: `unity-yaml:script:${GUID.coinScript}` }),
       ctx
     );
     expect(resolved).toBeNull();
@@ -779,7 +963,7 @@ describe('unityAssetResolver', () => {
       getNodesInFile: () => [makeSymbol({ id: 'class:coin', kind: 'class', name: 'Coin', filePath: 'Assets/Scripts/Coin.cs', startLine: 1, endLine: 5 })],
     });
     const resolved = unityAssetResolver.resolve(
-      makeRef({ referenceName: `unity:script:${GUID.coinScript}`, language: 'csharp' }),
+      makeRef({ referenceName: `unity-yaml:script:${GUID.coinScript}`, language: 'csharp' }),
       ctx
     );
     expect(resolved).toBeNull();

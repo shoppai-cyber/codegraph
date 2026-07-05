@@ -4,12 +4,12 @@
  * Binds the cross-file references the standalone `UnityAssetExtractor` emits
  * from `.unity`/`.prefab`/`.asset` YAML:
  *
- * - `unity:script:<guid>` → the script's primary class node (attached
+ * - `unity-yaml:script:<guid>` → the script's primary class node (attached
  *   MonoBehaviour, or a ScriptableObject's type).
- * - `unity:asset:<guid>`  → the referenced prefab/asset's `file` node (a
+ * - `unity-yaml:asset:<guid>`  → the referenced prefab/asset's `file` node (a
  *   PrefabInstance source, or a serialized prefab-asset field). A guid that
  *   maps to a `.cs` (a MonoScript reference) resolves to its class node.
- * - `unity:method:<guid>:<name>` → the uniquely-named method on the target
+ * - `unity-yaml:method:<guid>:<name>` → the uniquely-named method on the target
  *   script (a UnityEvent persistent call).
  *
  * The link from a guid to a file is Unity's `.meta` sidecar convention: every
@@ -26,9 +26,13 @@
 import { Node } from '../../types';
 import { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types';
 
-const SCRIPT_REF_PREFIX = 'unity:script:';
-const ASSET_REF_PREFIX = 'unity:asset:';
-const METHOD_REF_PREFIX = 'unity:method:';
+// A `unity-yaml:` namespace, distinct from the C# Unity resolver's `unity:host:`
+// / `unity:field:` / `unity:method:` prefixes — the method form would otherwise
+// collide (both claim `unity:method:`), leaving only the language guard between
+// them (finding 4).
+const SCRIPT_REF_PREFIX = 'unity-yaml:script:';
+const ASSET_REF_PREFIX = 'unity-yaml:asset:';
+const METHOD_REF_PREFIX = 'unity-yaml:method:';
 
 // Asset kinds whose `.meta` guids can be a reference target.
 const GUID_BEARING_EXTS = ['.cs', '.prefab', '.asset'];
@@ -135,6 +139,11 @@ export const unityAssetResolver: FrameworkResolver = {
   languages: ['unity_yaml'],
 
   detect(context: ResolutionContext): boolean {
+    // detect() runs once at the start of each resolution pass — treat it as the
+    // resolver's init and drop any guid map cached from a previous pass, so a
+    // `.meta` guid edit between passes can't be served a stale mapping (the
+    // sampled cache key alone wouldn't notice a same-count, same-endpoints edit).
+    guidCache = null;
     if (context.fileExists('ProjectSettings/ProjectVersion.txt')) return true;
     const files = context.getAllFiles();
     if (files.some((f) => f.endsWith('.unity') || f.endsWith('.prefab') || f.endsWith('.asmdef'))) return true;
