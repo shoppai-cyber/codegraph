@@ -23,6 +23,7 @@ import { goResolver } from './go';
 import { goframeResolver } from './goframe';
 import { rustResolver } from './rust';
 import { aspnetResolver } from './csharp';
+import { unityResolver } from './unity';
 import { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 import { swiftObjcBridgeResolver } from './swift-objc';
 import { reactNativeBridgeResolver } from './react-native';
@@ -61,6 +62,7 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   rustResolver,
   // C#
   aspnetResolver,
+  unityResolver,
   // Swift
   swiftUIResolver,
   uikitResolver,
@@ -145,6 +147,7 @@ export { goResolver } from './go';
 export { goframeResolver } from './goframe';
 export { rustResolver } from './rust';
 export { aspnetResolver } from './csharp';
+export { unityResolver } from './unity';
 export { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 export { swiftObjcBridgeResolver } from './swift-objc';
 export { reactNativeBridgeResolver } from './react-native';

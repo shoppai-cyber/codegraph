@@ -22,6 +22,12 @@ look dead to the graph (the "zero callers ≠ dead" footgun). C# already parses 
 **Full plan (read first):** `C:\dev\vault\projects\AutoResearch\staging\plan-2026-07-05-codegraph-unity-resolver.md`
 (cross-repo absolute path — readable from here). It carries the tiered scope, deliverables, and sequencing.
 
+**Canonical current plan (read next, update in place):**
+`C:\dev\repos\unity\databases\unity-docs\UNITY-CORPUS-RESOLVER-PLAN.md`. This is the durable
+live plan for the reusable Unity docs corpus + CodeGraph Unity resolver handoff. If Kyle asks for
+"the plan" or asks to update it, update that file rather than creating another plan file unless
+Kyle explicitly asks for a new versioned plan.
+
 **The template is right here in-tree** (this branch is stacked on `feat/blender-resolver`):
 - `src/resolution/frameworks/blender.ts` (~1033 LOC) — the `FrameworkResolver` implementation to mirror.
 - `src/resolution/frameworks/blender-invocation-table.json` — the domain-rule data file; `unity-invocation-table.json` mirrors its shape (a `consumed` slice the `.ts` reads + a `catalogNotes` provenance section).
