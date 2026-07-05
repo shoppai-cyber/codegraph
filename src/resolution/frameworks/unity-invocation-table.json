@@ -6,12 +6,12 @@
   "status": "Fable-reviewed v1 scope plus the FishNet Tier-2 networking section. Consumed lists are grounded in the local Unity 6.5 corpus and FABLE-SCOPE-DECISIONS.md (Tier 1) and the FishNet 4.7.2 corpus verified against the validation project's 4.6.20 source (Tier 2, see resolver-facts/FISHNET-RESOLVER-FACTS.md); pending rows are explicitly marked or quarantined. Runtime consumption must stay inside the consumed sections.",
   "consumed": {
     "note": "Sections here are read by unity.ts at runtime; the fields consumed are named per section. Everything under catalogNotes is documentation-only provenance. This mirrors blender-invocation-table.json's consumed/catalogNotes split.",
-    "detection": "project-level sufficient markers plus source evidence rules used by detect() to recognize a Unity project",
+    "detection": "DOCUMENTATION-ONLY despite sitting in this manifest: the marker list is hardcoded in unity.ts detect()/hasConcreteUnitySourceSignal — editing this section changes nothing at runtime. Describes project-level sufficient markers plus source evidence rules used to recognize a Unity project.",
     "hostInvokedBases": "key set (the host-invoked-base whitelist); <base>.hostInvokedMethods (engine/editor calls these by reflection, so they look dead)",
     "serializationAttributes": "attribute set → field kept live + its declared type emits a references edge",
     "attributeEntryPoints": "attribute → the decorated method/class is a host-invoked entry point (kept live); menu/path string captured where present",
     "typeReferenceAttributes": "attribute → typeof(X)/type argument emits a references edge to X",
-    "stringInvokedCallSites": "callsite API → its string-literal method-name argument links to a sibling method (references)",
+    "stringInvokedCallSites": "DOCUMENTATION-ONLY despite sitting in this manifest: the call-site families (SendMessage/Invoke/StartCoroutine/ContextMenuItem) are hardcoded in unity.ts processStringCalls/processContextMenuItems — editing this section changes nothing at runtime. Describes callsite API → its string-literal method-name argument links to a sibling method (references). This mirrors how blender-invocation-table.json documents its hardcoded call-site behavior under catalogNotes.",
     "fishnet": "gated FishNet 4.x networking rules: fishnet.gate (per-file using-based gate), fishnet.hostInvokedBases.NetworkBehaviour.hostInvokedMethods (+includesMonoBehaviourMessages union), and fishnet.attributeEntryPoints.methodAttributes (RPC/prediction entry points). Every fishnet row only fires when fishnet.gate is open in that file."
   },
   "sourcePriority": [
