@@ -10,7 +10,7 @@ import * as path from 'path';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { Language } from '../types';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unity_yaml' | 'unknown'>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -127,6 +127,13 @@ export const EXTENSION_MAP: Record<string, Language> = {
   // shape as the `.yml` variants — the YAML/properties extractor emits one node
   // per leaf key, and the Spring resolver links `@Value("${k}")` references.
   '.properties': 'properties',
+  // Unity serialized YAML: scenes, prefabs, and ScriptableObject/settings assets
+  // (Force-Text serialization). Parsed by the standalone UnityAssetExtractor —
+  // GameObject/prefab nodes + asset-wiring edges. Binary-serialized `.asset`
+  // files (no `%YAML` header) parse to nothing.
+  '.unity': 'unity_yaml',
+  '.prefab': 'unity_yaml',
+  '.asset': 'unity_yaml',
 };
 
 /**
@@ -347,6 +354,7 @@ export function isLanguageSupported(language: Language): boolean {
   if (language === 'twig') return true; // file-level tracking only
   if (language === 'xml') return true; // MyBatis mapper extractor
   if (language === 'properties') return true; // Spring config keys
+  if (language === 'unity_yaml') return true; // custom UnityAssetExtractor (scene/prefab wiring)
   if (language === 'unknown') return false;
   return language in WASM_GRAMMAR_FILES;
 }
@@ -358,6 +366,7 @@ export function isGrammarLoaded(language: Language): boolean {
   if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor') return true;
   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
+  if (language === 'unity_yaml') return true; // no WASM grammar needed (custom extractor)
   return languageCache.has(language);
 }
 
@@ -459,6 +468,7 @@ export function getLanguageDisplayName(language: Language): string {
     cfml: 'CFML',
     cfscript: 'CFScript',
     cfquery: 'CFQuery (SQL)',
+    unity_yaml: 'Unity YAML',
     unknown: 'Unknown',
   };
   return names[language] || language;
