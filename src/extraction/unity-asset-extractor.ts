@@ -22,11 +22,13 @@ import { generateNodeId } from './tree-sitter-helpers';
  * - direct `references` edges for scene-object field wires (a serialized
  *   `{fileID}` with no guid, resolved to a target GameObject in the SAME file);
  * - `UnresolvedReference`s (all `referenceKind: 'references'`) for cross-file
- *   wiring — `unity:script:<guid>` (attached script), `unity:asset:<guid>`
+ *   wiring — `unity-yaml:script:<guid>` (attached script), `unity-yaml:asset:<guid>`
  *   (PrefabInstance source / serialized prefab-asset field), and
- *   `unity:method:<guid>:<name>` (UnityEvent persistent call). The
- *   `unity-assets` framework resolver binds these via a sibling `.meta` GUID
- *   map.
+ *   `unity-yaml:event:<Type>:<method>` (UnityEvent persistent call — the target
+ *   TYPE from `m_TargetAssemblyTypeName`, not a fileID/guid deref, plus the bare
+ *   `m_MethodName`). The `unity-assets` framework resolver binds the guid forms
+ *   via a sibling `.meta` map, and the event form by resolving the type name to
+ *   an indexed C# class.
  *
  * Emit-nothing policy: an unresolvable GUID yields no edge (package scripts
  * under Library/ are never indexed → correct silence), ambiguity yields
@@ -445,26 +447,65 @@ export class UnityAssetExtractor {
   }
 
   /**
-   * UnityEvent persistent calls: pair each `m_Target: {…guid…}` with the
-   * following `m_MethodName:`. Only guid-carrying targets (a script asset)
-   * resolve — a scene-object target (fileID only) needs the source component's
-   * type, which isn't available at extract time, so it is left uncovered.
+   * UnityEvent persistent calls. Each call in `m_PersistentCalls.m_Calls` is a
+   * list item of the shape (verbatim Unity serialization):
+   *
+   *     - m_Target: {fileID: 1357023918}
+   *       m_TargetAssemblyTypeName: GameManager, Assembly-CSharp
+   *       m_MethodName: ResetScore
+   *       m_Mode: 0
+   *
+   * `m_Target` is a scene-local `!u!114` COMPONENT fileID (never a MonoScript
+   * guid), so its type can't be read from the target line. The reliable, deref-
+   * free type source is `m_TargetAssemblyTypeName` (`<Type>, <Assembly>`) sitting
+   * beside `m_MethodName` — comma-split gives the assembly-qualified type. We emit
+   * `unity-yaml:event:<Type>:<method>`, keyed by TYPE NAME; the resolver binds it
+   * to a uniquely-named method on the indexed C# class of that name. This shape
+   * appears identically under our own serialized fields (`onDeath:`) and package
+   * component fields (Button's `m_OnClick:`) — both parse the same way; a target
+   * whose type has no source in the project (Button, etc.) simply never resolves.
+   *
+   * Emit-nothing discipline: a cleared target (`m_Target: {fileID: 0}`) or an
+   * empty/absent `m_TargetAssemblyTypeName` yields no ref. Overload disambiguation
+   * (no parameter list exists in the YAML) is left to the resolver.
    */
   private emitPersistentCalls(mb: MonoBehaviourInfo, ownerNodeId: string): void {
-    let pendingGuid: string | undefined;
+    let pendingTargetFileID: string | undefined;
+    let pendingType: string | undefined;
     let pendingLine = mb.startLine;
     for (let i = 0; i < mb.body.length; i++) {
       const line = mb.body[i]!;
-      const target = line.match(/m_Target: \{fileID: (-?\d+)(?:, guid: ([0-9a-fA-F]+))?(?:, type: -?\d+)?\}/);
+
+      // Start of a persistent call. A new m_Target resets per-call accumulation
+      // so a prior call's type can't leak into one that omits its own.
+      const target = line.match(/m_Target: \{fileID: (-?\d+)/);
       if (target) {
-        pendingGuid = target[2];
+        pendingTargetFileID = target[1];
+        pendingType = undefined;
         pendingLine = mb.startLine + i;
         continue;
       }
+
+      // Assembly-qualified target type `<Type>, <Assembly>`: the type part is
+      // everything before the first comma (keep any dotted namespace for the
+      // resolver to disambiguate on). An empty value (cleared target) leaves it
+      // unset so nothing is emitted.
+      const typeName = line.match(/m_TargetAssemblyTypeName:\s*(.*\S)?\s*$/);
+      if (typeName && pendingTargetFileID !== undefined) {
+        const typePart = (typeName[1] ?? '').split(',')[0]!.trim();
+        pendingType = typePart || undefined;
+        continue;
+      }
+
+      // Bare method name (no signature). Emit only for a live scene-local target
+      // (fileID ≠ 0) carrying a resolvable type.
       const method = line.match(/m_MethodName:\s*(\S+)\s*$/);
       if (method) {
-        if (pendingGuid) this.addRef(ownerNodeId, `unity-yaml:method:${pendingGuid}:${method[1]}`, pendingLine);
-        pendingGuid = undefined;
+        if (pendingType && pendingTargetFileID && pendingTargetFileID !== '0') {
+          this.addRef(ownerNodeId, `unity-yaml:event:${pendingType}:${method[1]}`, pendingLine);
+        }
+        pendingTargetFileID = undefined;
+        pendingType = undefined;
       }
     }
   }

@@ -9,8 +9,12 @@
  * - `unity-yaml:asset:<guid>`  → the referenced prefab/asset's `file` node (a
  *   PrefabInstance source, or a serialized prefab-asset field). A guid that
  *   maps to a `.cs` (a MonoScript reference) resolves to its class node.
- * - `unity-yaml:method:<guid>:<name>` → the uniquely-named method on the target
- *   script (a UnityEvent persistent call).
+ * - `unity-yaml:event:<Type>:<name>` → the uniquely-named method `<name>` on the
+ *   indexed C# class `<Type>` (a UnityEvent persistent call). The type comes from
+ *   the YAML's `m_TargetAssemblyTypeName` (no guid deref), so a package/asset
+ *   target with no source in the project (Button, …) resolves to nothing, and an
+ *   overloaded method name — the YAML carries no parameter list — also resolves
+ *   to nothing (a documented v1 limit).
  *
  * The link from a guid to a file is Unity's `.meta` sidecar convention: every
  * asset `X` has an `X.meta` whose `guid:` line is the stable identity that
@@ -32,7 +36,7 @@ import { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from
 // them (finding 4).
 const SCRIPT_REF_PREFIX = 'unity-yaml:script:';
 const ASSET_REF_PREFIX = 'unity-yaml:asset:';
-const METHOD_REF_PREFIX = 'unity-yaml:method:';
+const EVENT_REF_PREFIX = 'unity-yaml:event:';
 
 // Asset kinds whose `.meta` guids can be a reference target.
 const GUID_BEARING_EXTS = ['.cs', '.prefab', '.asset'];
@@ -124,14 +128,32 @@ function resolveAsset(ref: UnresolvedRef, guid: string, context: ResolutionConte
   return fileNode ? resolved(ref, fileNode) : null;
 }
 
-function resolveMethod(ref: UnresolvedRef, guid: string, method: string, context: ResolutionContext): ResolvedRef | null {
-  const path = getGuidMap(context).get(guid);
-  if (!path || !path.endsWith('.cs')) return null;
-  const candidates = context
-    .getNodesInFile(path)
-    .filter((n) => (n.kind === 'method' || n.kind === 'function') && n.name === method);
-  // Refuse to guess between overloads / ambiguous matches.
-  return candidates.length === 1 ? resolved(ref, candidates[0]!) : null;
+/**
+ * Resolve a UnityEvent persistent call by TYPE NAME. `fullType` is the type part
+ * of `m_TargetAssemblyTypeName` (possibly dotted, e.g. `My.Ns.GameManager`); the
+ * bare class name is its last dot-segment. We bind the call to the uniquely-named
+ * `method` lexically inside the single indexed class of that name. Emit-nothing
+ * discipline: no such class (package/asset target), an AMBIGUOUS class name, or an
+ * overloaded method (≥2 defs — the YAML has no parameter list) all resolve to null.
+ */
+function resolveEvent(ref: UnresolvedRef, fullType: string, method: string, context: ResolutionContext): ResolvedRef | null {
+  const className = fullType.includes('.') ? fullType.split('.').pop()! : fullType;
+  if (!className) return null;
+  const classes = context
+    .getNodesByName(className)
+    .filter((n) => n.kind === 'class' || n.kind === 'struct' || n.kind === 'interface');
+  if (classes.length !== 1) return null; // no class in the project, or ambiguous name
+  const cls = classes[0]!;
+  const methods = context
+    .getNodesInFile(cls.filePath)
+    .filter(
+      (n) =>
+        (n.kind === 'method' || n.kind === 'function') &&
+        n.name === method &&
+        n.startLine >= cls.startLine &&
+        n.startLine <= cls.endLine
+    );
+  return methods.length === 1 ? resolved(ref, methods[0]!) : null;
 }
 
 export const unityAssetResolver: FrameworkResolver = {
@@ -154,7 +176,7 @@ export const unityAssetResolver: FrameworkResolver = {
     return (
       name.startsWith(SCRIPT_REF_PREFIX) ||
       name.startsWith(ASSET_REF_PREFIX) ||
-      name.startsWith(METHOD_REF_PREFIX)
+      name.startsWith(EVENT_REF_PREFIX)
     );
   },
 
@@ -167,11 +189,13 @@ export const unityAssetResolver: FrameworkResolver = {
     if (name.startsWith(ASSET_REF_PREFIX)) {
       return resolveAsset(ref, name.slice(ASSET_REF_PREFIX.length), context);
     }
-    if (name.startsWith(METHOD_REF_PREFIX)) {
-      const rest = name.slice(METHOD_REF_PREFIX.length);
+    if (name.startsWith(EVENT_REF_PREFIX)) {
+      // `<Type>:<method>` — the type part is dotted (never colon-bearing), so the
+      // first colon separates type from the bare method name.
+      const rest = name.slice(EVENT_REF_PREFIX.length);
       const sep = rest.indexOf(':');
       if (sep <= 0) return null;
-      return resolveMethod(ref, rest.slice(0, sep), rest.slice(sep + 1), context);
+      return resolveEvent(ref, rest.slice(0, sep), rest.slice(sep + 1), context);
     }
     return null;
   },

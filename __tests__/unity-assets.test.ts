@@ -5,8 +5,10 @@
  * `.prefab`, and `.asset` YAML at index time and emits GameObject/prefab
  * nodes, containment/hierarchy edges, intra-file scene-object field wires,
  * and cross-file references (script class, prefab/asset source, UnityEvent
- * method) that the `unity-assets` framework resolver binds via a sibling
- * `.meta` GUID map.
+ * method) that the `unity-assets` framework resolver binds — the guid forms
+ * via a sibling `.meta` GUID map, and the UnityEvent form by resolving the
+ * serialized target TYPE name (`m_TargetAssemblyTypeName`) to an indexed
+ * C# class.
  *
  * Assertions are exhaustive: exact sorted node names, edge pairs, and
  * reference names. A fabricated node/edge/ref fails the test as hard as a
@@ -33,6 +35,11 @@ const GUID = {
   enemyAI: '58067f1d0bb95044f9f3d19e820ac6f1',
   enemyPrefab: 'e6664d4658ea11f4db518b9ec367f031',
   weaponPrefab: 'a1d1502710d762e43a0c9d2908a0e5e4',
+  // Part F UnityEvent fixture (tester-01 CoinDash): PlayerHealth.onDeath and
+  // Button.m_OnClick both persistently invoke GameManager.ResetScore.
+  playerHealth: 'fd5424596a3326042a0ca777d9f1b77f',
+  gameManager: 'f5b17122a270e4948a67e1d6c0a0e1c1',
+  uiButton: '4e29b1a8efbd4b44bb3f3716e73f07ff',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -672,51 +679,125 @@ MonoBehaviour:
     ].sort());
   });
 
-  it('UnityEvent persistent call: m_PersistentCalls → method ref on the target script', () => {
-    // Hand-authored (the fixture has no UnityEvents wired). A Button-like
-    // MonoBehaviour whose onClick persistently invokes GameManager.AddScore.
+  it('UnityEvent persistent calls (real Part F shape): onDeath (our field) and m_OnClick (package Button) → one event ref each, keyed by target type', () => {
+    // Verbatim from tester-01: PlayerHealth.onDeath and Button.m_OnClick both
+    // persistently invoke GameManager.ResetScore. m_Target is a scene-local
+    // component fileID (not a MonoScript guid); the type comes from
+    // m_TargetAssemblyTypeName, so BOTH shapes parse the same way — the host
+    // block's own m_Script guid is irrelevant to the target type.
     const src = `${HEADER}
---- !u!1 &100
+--- !u!1 &975176587
 GameObject:
   m_Component:
-  - component: {fileID: 101}
-  - component: {fileID: 102}
-  m_Name: ScoreButton
---- !u!4 &101
+  - component: {fileID: 975176588}
+  - component: {fileID: 975176589}
+  m_Name: Player
+  m_IsActive: 1
+--- !u!4 &975176588
 Transform:
-  m_GameObject: {fileID: 100}
+  m_GameObject: {fileID: 975176587}
   m_Father: {fileID: 0}
---- !u!114 &102
+--- !u!114 &975176589
 MonoBehaviour:
-  m_GameObject: {fileID: 100}
-  m_Script: {fileID: 11500000, guid: ${GUID.cameraFollow}, type: 3}
-  m_EditorClassIdentifier: Assembly-CSharp::CameraFollow
-  onClick:
+  m_GameObject: {fileID: 975176587}
+  m_Script: {fileID: 11500000, guid: ${GUID.playerHealth}, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::PlayerHealth
+  maxHealth: 100
+  currentHealth: 0
+  onDeath:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 0, guid: ${GUID.enemySpawner}, type: 3}
+      - m_Target: {fileID: 1357023918}
         m_TargetAssemblyTypeName: GameManager, Assembly-CSharp
-        m_MethodName: AddScore
-        m_Mode: 1
+        m_MethodName: ResetScore
+        m_Mode: 0
         m_Arguments:
           m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName:
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument:
+          m_BoolArgument: 0
+        m_CallState: 2
+--- !u!1 &483588818
+GameObject:
+  m_Component:
+  - component: {fileID: 483588819}
+  - component: {fileID: 483588820}
+  m_Name: RestartButton
+  m_IsActive: 1
+--- !u!224 &483588819
+RectTransform:
+  m_GameObject: {fileID: 483588818}
+  m_Father: {fileID: 0}
+--- !u!114 &483588820
+MonoBehaviour:
+  m_GameObject: {fileID: 483588818}
+  m_Script: {fileID: 11500000, guid: ${GUID.uiButton}, type: 3}
+  m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.Button
+  m_Interactable: 1
+  m_OnClick:
+    m_PersistentCalls:
+      m_Calls:
+      - m_Target: {fileID: 1357023918}
+        m_TargetAssemblyTypeName: GameManager, Assembly-CSharp
+        m_MethodName: ResetScore
+        m_Mode: 0
+        m_Arguments:
+          m_ObjectArgument: {fileID: 0}
+          m_ObjectArgumentAssemblyTypeName:
+          m_IntArgument: 0
+          m_FloatArgument: 0
+          m_StringArgument:
+          m_BoolArgument: 0
+        m_CallState: 2
+--- !u!1 &1357023917
+GameObject:
+  m_Component:
+  - component: {fileID: 1357023919}
+  - component: {fileID: 1357023918}
+  m_Name: GameManager
+  m_IsActive: 1
+--- !u!4 &1357023919
+Transform:
+  m_GameObject: {fileID: 1357023917}
+  m_Father: {fileID: 0}
+--- !u!114 &1357023918
+MonoBehaviour:
+  m_GameObject: {fileID: 1357023917}
+  m_Script: {fileID: 11500000, guid: ${GUID.gameManager}, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::GameManager
+  score: 0
 `;
     const result = extract(src, 'Assets/Scenes/Game.unity');
 
-    expect(refNames(result)).toContain(`references:unity-yaml:method:${GUID.enemySpawner}:AddScore`);
+    // Exactly two event refs, both keyed by the TARGET type (GameManager), one
+    // attributed to each host field site (Player's PlayerHealth, RestartButton's
+    // Button) — proving the user-field and package-field shapes both parse.
+    const eventRefs = result.unresolvedReferences.filter(
+      (r) => r.referenceName === 'unity-yaml:event:GameManager:ResetScore'
+    );
+    expect(eventRefs.length).toBe(2);
+    const names = idToName(result);
+    expect(eventRefs.map((r) => names.get(r.fromNodeId)).sort()).toEqual(['Player', 'RestartButton']);
+
+    // Each host still carries its own script ref (the Button's ugui guid is
+    // never indexed → correct silence at resolution, but the ref is still emitted).
+    expect(refNames(result)).toContain(`references:unity-yaml:script:${GUID.playerHealth}`);
+    expect(refNames(result)).toContain(`references:unity-yaml:script:${GUID.uiButton}`);
+    expect(refNames(result)).toContain(`references:unity-yaml:script:${GUID.gameManager}`);
   });
 
-  it('UnityEvent persistent call whose m_Target has no GUID (scene-object target) emits no method ref', () => {
-    // A persistent call targeting a scene object carries only a fileID — the
-    // declaring type isn't knowable at extract time, so no method ref is
-    // fabricated (a missed edge beats a guessed one).
+  it('UnityEvent persistent call with an empty m_TargetAssemblyTypeName emits no event ref', () => {
+    // A cleared/unassigned target type carries no resolvable class name → nothing
+    // (emit-nothing discipline: a missed edge beats a fabricated one).
     const src = `${HEADER}
 --- !u!1 &100
 GameObject:
   m_Component:
   - component: {fileID: 101}
   - component: {fileID: 102}
-  m_Name: ScoreButton
+  m_Name: Player
 --- !u!4 &101
 Transform:
   m_GameObject: {fileID: 100}
@@ -724,20 +805,54 @@ Transform:
 --- !u!114 &102
 MonoBehaviour:
   m_GameObject: {fileID: 100}
-  m_Script: {fileID: 11500000, guid: ${GUID.cameraFollow}, type: 3}
-  m_EditorClassIdentifier: Assembly-CSharp::CameraFollow
-  onClick:
+  m_Script: {fileID: 11500000, guid: ${GUID.playerHealth}, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::PlayerHealth
+  onDeath:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 5678}
-        m_MethodName: AddScore
-        m_Mode: 1
+      - m_Target: {fileID: 1357023918}
+        m_TargetAssemblyTypeName:
+        m_MethodName: ResetScore
+        m_Mode: 0
 `;
     const result = extract(src, 'Assets/Scenes/Game.unity');
 
-    // The script ref is still emitted; no method ref at all.
-    expect(refNames(result).some((r) => r.includes(':method:'))).toBe(false);
-    expect(refNames(result)).toContain(`references:unity-yaml:script:${GUID.cameraFollow}`);
+    expect(refNames(result).some((r) => r.includes(':event:'))).toBe(false);
+    // The host script ref is still emitted.
+    expect(refNames(result)).toContain(`references:unity-yaml:script:${GUID.playerHealth}`);
+  });
+
+  it('UnityEvent persistent call with a cleared m_Target (fileID 0) emits no event ref', () => {
+    // fileID 0 = no assigned receiver; even with a type name present there is no
+    // live call, so nothing is emitted.
+    const src = `${HEADER}
+--- !u!1 &100
+GameObject:
+  m_Component:
+  - component: {fileID: 101}
+  - component: {fileID: 102}
+  m_Name: Player
+--- !u!4 &101
+Transform:
+  m_GameObject: {fileID: 100}
+  m_Father: {fileID: 0}
+--- !u!114 &102
+MonoBehaviour:
+  m_GameObject: {fileID: 100}
+  m_Script: {fileID: 11500000, guid: ${GUID.playerHealth}, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::PlayerHealth
+  onDeath:
+    m_PersistentCalls:
+      m_Calls:
+      - m_Target: {fileID: 0}
+        m_TargetAssemblyTypeName: GameManager, Assembly-CSharp
+        m_MethodName: ResetScore
+        m_Mode: 0
+`;
+    const result = extract(src, 'Assets/Scenes/Game.unity');
+
+    expect(refNames(result).some((r) => r.includes(':event:'))).toBe(false);
+    expect(refNames(result)).toContain(`references:unity-yaml:script:${GUID.playerHealth}`);
   });
 
   it('decoration-only prefab: emits a file node (so it is a resolvable asset target) but no GameObject nodes', () => {
@@ -831,7 +946,7 @@ describe('unityAssetResolver', () => {
   it('claimsReference only for its own unity-yaml: prefixes, never the C# resolver ones', () => {
     expect(unityAssetResolver.claimsReference!(`unity-yaml:script:${GUID.coinScript}`)).toBe(true);
     expect(unityAssetResolver.claimsReference!(`unity-yaml:asset:${GUID.enemyPrefab}`)).toBe(true);
-    expect(unityAssetResolver.claimsReference!(`unity-yaml:method:${GUID.enemySpawner}:AddScore`)).toBe(true);
+    expect(unityAssetResolver.claimsReference!('unity-yaml:event:GameManager:ResetScore')).toBe(true);
     expect(unityAssetResolver.claimsReference!('SomeClass')).toBe(false);
     // The C# Unity resolver owns unity:host: / unity:field: / unity:method: — the
     // YAML resolver must NOT claim any of them (finding 4: the method form used to
@@ -901,27 +1016,99 @@ describe('unityAssetResolver', () => {
     expect(resolved?.targetNodeId).toBe('file:enemy-prefab');
   });
 
-  it('resolves unity-yaml:method:<guid>:<name> to the uniquely-named method node', () => {
+  it('resolves unity-yaml:event:<Type>:<name> to the uniquely-named method on the indexed class', () => {
+    const gmClass = makeSymbol({
+      id: 'class:gm',
+      kind: 'class',
+      name: 'GameManager',
+      filePath: 'Assets/Scripts/GameManager.cs',
+      startLine: 1,
+      endLine: 20,
+    });
     const method = makeSymbol({
-      id: 'method:addscore',
+      id: 'method:resetscore',
       kind: 'method',
-      name: 'AddScore',
+      name: 'ResetScore',
       filePath: 'Assets/Scripts/GameManager.cs',
       startLine: 10,
       endLine: 14,
     });
     const ctx = makeContext({
-      getAllFiles: () => ['Assets/Scripts/GameManager.cs'],
-      readFile: (p) =>
-        p === 'Assets/Scripts/GameManager.cs.meta' ? `fileFormatVersion: 2\nguid: ${GUID.enemySpawner}` : null,
-      getNodesInFile: (p) => (p === 'Assets/Scripts/GameManager.cs' ? [method] : []),
+      getNodesByName: (n) => (n === 'GameManager' ? [gmClass] : []),
+      getNodesInFile: (p) => (p === 'Assets/Scripts/GameManager.cs' ? [gmClass, method] : []),
     });
 
     const resolved = unityAssetResolver.resolve(
-      makeRef({ referenceName: `unity-yaml:method:${GUID.enemySpawner}:AddScore` }),
+      makeRef({ referenceName: 'unity-yaml:event:GameManager:ResetScore' }),
       ctx
     );
-    expect(resolved?.targetNodeId).toBe('method:addscore');
+    expect(resolved?.targetNodeId).toBe('method:resetscore');
+  });
+
+  it('resolves a namespaced m_TargetAssemblyTypeName by its bare (last dot-segment) class name', () => {
+    const gmClass = makeSymbol({
+      id: 'class:gm',
+      kind: 'class',
+      name: 'GameManager',
+      filePath: 'Assets/Scripts/GameManager.cs',
+      startLine: 1,
+      endLine: 20,
+    });
+    const method = makeSymbol({
+      id: 'method:resetscore',
+      kind: 'method',
+      name: 'ResetScore',
+      filePath: 'Assets/Scripts/GameManager.cs',
+      startLine: 10,
+      endLine: 14,
+    });
+    const ctx = makeContext({
+      getNodesByName: (n) => (n === 'GameManager' ? [gmClass] : []),
+      getNodesInFile: (p) => (p === 'Assets/Scripts/GameManager.cs' ? [gmClass, method] : []),
+    });
+
+    const resolved = unityAssetResolver.resolve(
+      makeRef({ referenceName: 'unity-yaml:event:CoinDash.Systems.GameManager:ResetScore' }),
+      ctx
+    );
+    expect(resolved?.targetNodeId).toBe('method:resetscore');
+  });
+
+  it('emits nothing for a UnityEvent target type with no source in the project (package type)', () => {
+    // Button lives in a Unity package (not indexed) → no class node → correct
+    // silence, exactly as for the fixture's real Button.m_OnClick target-type.
+    const ctx = makeContext({ getNodesByName: () => [] });
+    const resolved = unityAssetResolver.resolve(
+      makeRef({ referenceName: 'unity-yaml:event:Button:onClick' }),
+      ctx
+    );
+    expect(resolved).toBeNull();
+  });
+
+  it('emits nothing for an overloaded UnityEvent target method (the YAML carries no parameter list)', () => {
+    const gmClass = makeSymbol({ id: 'class:gm', kind: 'class', name: 'GameManager', filePath: 'Assets/Scripts/GameManager.cs', startLine: 1, endLine: 30 });
+    const m1 = makeSymbol({ id: 'method:reset1', kind: 'method', name: 'ResetScore', filePath: 'Assets/Scripts/GameManager.cs', startLine: 10, endLine: 12 });
+    const m2 = makeSymbol({ id: 'method:reset2', kind: 'method', name: 'ResetScore', filePath: 'Assets/Scripts/GameManager.cs', startLine: 14, endLine: 16 });
+    const ctx = makeContext({
+      getNodesByName: (n) => (n === 'GameManager' ? [gmClass] : []),
+      getNodesInFile: (p) => (p === 'Assets/Scripts/GameManager.cs' ? [gmClass, m1, m2] : []),
+    });
+    const resolved = unityAssetResolver.resolve(
+      makeRef({ referenceName: 'unity-yaml:event:GameManager:ResetScore' }),
+      ctx
+    );
+    expect(resolved).toBeNull();
+  });
+
+  it('emits nothing when the UnityEvent target class name is ambiguous (two indexed classes share it)', () => {
+    const a = makeSymbol({ id: 'class:gm1', kind: 'class', name: 'GameManager', filePath: 'A/GameManager.cs', startLine: 1, endLine: 10 });
+    const b = makeSymbol({ id: 'class:gm2', kind: 'class', name: 'GameManager', filePath: 'B/GameManager.cs', startLine: 1, endLine: 10 });
+    const ctx = makeContext({ getNodesByName: (n) => (n === 'GameManager' ? [a, b] : []) });
+    const resolved = unityAssetResolver.resolve(
+      makeRef({ referenceName: 'unity-yaml:event:GameManager:ResetScore' }),
+      ctx
+    );
+    expect(resolved).toBeNull();
   });
 
   it('emits nothing for an unresolvable GUID (package script not indexed)', () => {
