@@ -1156,3 +1156,114 @@ describe('unityAssetResolver', () => {
     expect(resolved).toBeNull();
   });
 });
+
+// ===========================================================================
+// Resolver — postExtract (PrefabInstance friendly-naming)
+// ===========================================================================
+
+describe('unityAssetResolver.postExtract', () => {
+  const SCENE = 'Assets/Scenes/Game.unity';
+
+  // A PrefabInstance node as the extractor emits it: conservative name, the
+  // `#PrefabInstance` qualifiedName marker, startLine = the `!u!1001` header line.
+  function instanceNode(startLine: number, name = 'PrefabInstance'): Node {
+    return makeSymbol({
+      id: `component:inst${startLine}`,
+      kind: 'component',
+      name,
+      filePath: SCENE,
+      startLine,
+      endLine: startLine,
+      language: 'unity_yaml',
+      qualifiedName: `${SCENE}#PrefabInstance`,
+      signature: 'PrefabInstance',
+      docstring: 'prefabInstance nameOverrides=555:BonusCoin',
+    });
+  }
+
+  // A scene whose only `!u!1001` document (header at line 1) sources `guid`.
+  function sceneWithInstance(guid: string): string {
+    return `--- !u!1001 &900
+PrefabInstance:
+  m_Modification:
+    m_TransformParent: {fileID: 2}
+    m_Modifications: []
+  m_SourcePrefab: {fileID: 100100000, guid: ${guid}, type: 3}
+`;
+  }
+
+  it('renames a PrefabInstance node to its source-prefab file stem (id + #PrefabInstance qualifiedName preserved)', () => {
+    const inst = instanceNode(1);
+    const ctx = makeContext({
+      getNodesByKind: (k) => (k === 'component' ? [inst] : []),
+      getAllFiles: () => ['Assets/prefabs/Enemy.prefab'],
+      readFile: (p) => {
+        if (p === SCENE) return sceneWithInstance(GUID.enemyPrefab);
+        if (p === 'Assets/prefabs/Enemy.prefab.meta') return `fileFormatVersion: 2\nguid: ${GUID.enemyPrefab}`;
+        return null;
+      },
+    });
+
+    const updates = unityAssetResolver.postExtract!(ctx);
+    expect(updates.length).toBe(1);
+    expect(updates[0]!.id).toBe('component:inst1'); // id preserved → edges intact
+    expect(updates[0]!.name).toBe('Enemy'); // renamed to the source-prefab stem
+    expect(updates[0]!.qualifiedName).toBe(`${SCENE}#PrefabInstance`); // stable idempotency marker
+    // The overrides metadata is left untouched.
+    expect(updates[0]!.docstring).toContain('BonusCoin');
+  });
+
+  it('leaves an instance conservatively named when its source guid is unindexed (package prefab)', () => {
+    const inst = instanceNode(1);
+    const ctx = makeContext({
+      getNodesByKind: (k) => (k === 'component' ? [inst] : []),
+      // The source guid maps to no indexed asset (a package prefab under Library/).
+      getAllFiles: () => [],
+      readFile: (p) => (p === SCENE ? sceneWithInstance('ffffffffffffffffffffffffffffffff') : null),
+    });
+
+    expect(unityAssetResolver.postExtract!(ctx)).toEqual([]);
+  });
+
+  it('is idempotent: an already-renamed instance re-derives the same stem and yields no update', () => {
+    const inst = instanceNode(1, 'Enemy'); // name already upgraded; qualifiedName still #PrefabInstance
+    const ctx = makeContext({
+      getNodesByKind: (k) => (k === 'component' ? [inst] : []),
+      getAllFiles: () => ['Assets/prefabs/Enemy.prefab'],
+      readFile: (p) => {
+        if (p === SCENE) return sceneWithInstance(GUID.enemyPrefab);
+        if (p === 'Assets/prefabs/Enemy.prefab.meta') return `fileFormatVersion: 2\nguid: ${GUID.enemyPrefab}`;
+        return null;
+      },
+    });
+
+    expect(unityAssetResolver.postExtract!(ctx)).toEqual([]);
+  });
+
+  it('does not rename a plain GameObject that happens to be named "PrefabInstance" (no 1001 doc at its line)', () => {
+    // A real GameObject literally named "PrefabInstance" shares the qualifiedName
+    // marker but has no `!u!1001` document at its line → never renamed.
+    const go = makeSymbol({
+      id: 'component:go5',
+      kind: 'component',
+      name: 'PrefabInstance',
+      filePath: SCENE,
+      startLine: 5,
+      endLine: 5,
+      language: 'unity_yaml',
+      qualifiedName: `${SCENE}#PrefabInstance`,
+    });
+    const ctx = makeContext({
+      getNodesByKind: (k) => (k === 'component' ? [go] : []),
+      getAllFiles: () => ['Assets/prefabs/Enemy.prefab'],
+      readFile: (p) => {
+        // The 1001 doc is at line 1; the GameObject node claims line 5.
+        if (p === SCENE) return sceneWithInstance(GUID.enemyPrefab);
+        if (p === 'Assets/prefabs/Enemy.prefab.meta') return `fileFormatVersion: 2\nguid: ${GUID.enemyPrefab}`;
+        return null;
+      },
+    });
+
+    expect(unityAssetResolver.postExtract!(ctx)).toEqual([]);
+  });
+});

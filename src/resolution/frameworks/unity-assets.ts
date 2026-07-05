@@ -25,6 +25,14 @@
  * no edge (correct silence). Resolution refuses to guess: a guid missing from
  * the map, or a `.cs` whose primary class is ambiguous, resolves to nothing. A
  * missed edge beats a fabricated one.
+ *
+ * `postExtract` renames `PrefabInstance` component nodes to their source-prefab
+ * file stem (`Coin`, `Enemy`) — the always-correct friendly name the extractor
+ * can't produce per-file (the source guid → path map is only available
+ * cross-file, at resolution time). The extractor names every instance the
+ * conservative `PrefabInstance`; this pass upgrades that where the source
+ * resolves, leaving the `#PrefabInstance` qualifiedName as the stable idempotency
+ * marker and the `nameOverrides` docstring metadata untouched.
  */
 
 import { Node } from '../../types';
@@ -90,6 +98,42 @@ function getGuidMap(context: ResolutionContext): Map<string, string> {
 
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+/** File basename minus its final extension (`Coin.prefab` → `Coin`). */
+function fileStem(path: string): string {
+  return basename(path).replace(/\.[^.]+$/, '');
+}
+
+// The stable qualifiedName suffix the extractor stamps on every PrefabInstance
+// node. It is preserved verbatim through `postExtract` renames so the pass can
+// re-select and re-derive the friendly name idempotently, on a full re-index or
+// any later incremental sync (even one that only re-points the source prefab).
+const INSTANCE_QN_SUFFIX = '#PrefabInstance';
+
+/**
+ * Map each `!u!1001` PrefabInstance document's HEADER line (1-based, equal to the
+ * instance node's `startLine`) to its `m_SourcePrefab` guid. A lightweight line
+ * scan — `postExtract` only needs the source guid per instance, and matching on
+ * the header line ties the node back to its document without a full re-parse.
+ */
+function sourceGuidByInstanceLine(content: string): Map<number, string> {
+  const out = new Map<number, string>();
+  const lines = content.split(/\r?\n/);
+  let headerLine = -1;
+  let inInstance = false;
+  for (let i = 0; i < lines.length; i++) {
+    const header = lines[i]!.match(/^--- !u!(\d+) &\d+/);
+    if (header) {
+      inInstance = header[1] === '1001';
+      headerLine = i + 1;
+      continue;
+    }
+    if (!inInstance || out.has(headerLine)) continue;
+    const src = lines[i]!.match(/m_SourcePrefab: \{fileID: -?\d+(?:, guid: ([0-9a-fA-F]+))?/);
+    if (src && src[1]) out.set(headerLine, src[1]);
+  }
+  return out;
 }
 
 /** The class/struct/interface a `.cs` file is named for (Unity's rule), or the
@@ -198,5 +242,47 @@ export const unityAssetResolver: FrameworkResolver = {
       return resolveEvent(ref, rest.slice(0, sep), rest.slice(sep + 1), context);
     }
     return null;
+  },
+
+  /**
+   * Rename `PrefabInstance` component nodes to their source-prefab file stem
+   * (`Coin`, `Enemy`) — the friendly, always-correct name the per-file extractor
+   * can't produce (the source guid → path map is cross-file). Emit-nothing holds:
+   * an instance whose source guid is unindexed (a package prefab) keeps its
+   * conservative `PrefabInstance` name.
+   *
+   * Idempotent: instances are selected by the stable `#PrefabInstance`
+   * qualifiedName suffix (preserved through the rename) and confirmed against the
+   * file's actual `!u!1001` document at the node's line, so a re-run — or a run
+   * over an already-renamed node — re-derives the same name. The node `id` and
+   * `qualifiedName` are preserved so existing edges and the marker stay intact.
+   */
+  postExtract(context: ResolutionContext): Node[] {
+    const instances = context
+      .getNodesByKind('component')
+      .filter((n) => n.language === 'unity_yaml' && n.qualifiedName.endsWith(INSTANCE_QN_SUFFIX));
+    if (instances.length === 0) return [];
+
+    const guidMap = getGuidMap(context);
+    const perFile = new Map<string, Map<number, string>>(); // filePath → (headerLine → sourceGuid)
+    const updates: Node[] = [];
+
+    for (const inst of instances) {
+      let lineMap = perFile.get(inst.filePath);
+      if (!lineMap) {
+        const content = context.readFile(inst.filePath);
+        lineMap = content ? sourceGuidByInstanceLine(content) : new Map();
+        perFile.set(inst.filePath, lineMap);
+      }
+      const guid = lineMap.get(inst.startLine);
+      if (!guid) continue; // no 1001 doc at this line, or no source guid → leave as-is
+      const path = guidMap.get(guid);
+      if (!path || !path.endsWith('.prefab')) continue; // package/unindexed source → correct silence
+      const name = fileStem(path);
+      if (!name || name === inst.name) continue; // unresolvable stem or already correct
+      // Preserve id (edges) + qualifiedName (idempotency marker); rename only.
+      updates.push({ ...inst, name });
+    }
+    return updates;
   },
 };
