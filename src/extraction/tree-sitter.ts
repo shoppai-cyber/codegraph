@@ -27,6 +27,7 @@ import { RazorExtractor } from './razor-extractor';
 import { SvelteExtractor } from './svelte-extractor';
 import { AstroExtractor } from './astro-extractor';
 import { DfmExtractor } from './dfm-extractor';
+import { UnityAssetExtractor } from './unity-asset-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
 import { CfmlExtractor } from './cfml-extractor';
@@ -5886,6 +5887,12 @@ export function extractFromSource(
   ) {
     // Use custom extractor for DFM/FMX form files
     const extractor = new DfmExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'unity_yaml') {
+    // Custom extractor for Unity serialized YAML (scenes/prefabs/assets). Emits
+    // GameObject/prefab nodes + asset-wiring edges; binary or non-Unity content
+    // returns an empty result (no file node).
+    const extractor = new UnityAssetExtractor(filePath, source);
     result = extractor.extract();
   } else {
     const extractor = new TreeSitterExtractor(filePath, source, detectedLanguage);

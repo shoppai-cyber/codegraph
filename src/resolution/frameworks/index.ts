@@ -24,6 +24,7 @@ import { goframeResolver } from './goframe';
 import { rustResolver } from './rust';
 import { aspnetResolver } from './csharp';
 import { unityResolver } from './unity';
+import { unityAssetResolver } from './unity-assets';
 import { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 import { swiftObjcBridgeResolver } from './swift-objc';
 import { reactNativeBridgeResolver } from './react-native';
@@ -63,6 +64,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   // C#
   aspnetResolver,
   unityResolver,
+  // Unity scene/prefab/asset YAML wiring (guid→script/prefab/method)
+  unityAssetResolver,
   // Swift
   swiftUIResolver,
   uikitResolver,
@@ -148,6 +151,7 @@ export { goframeResolver } from './goframe';
 export { rustResolver } from './rust';
 export { aspnetResolver } from './csharp';
 export { unityResolver } from './unity';
+export { unityAssetResolver } from './unity-assets';
 export { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 export { swiftObjcBridgeResolver } from './swift-objc';
 export { reactNativeBridgeResolver } from './react-native';

@@ -98,6 +98,10 @@ export const LANGUAGES = [
   'cfml',
   'cfscript',
   'cfquery',
+  // Unity scene/prefab/asset YAML (.unity/.prefab/.asset). No tree-sitter
+  // grammar — parsed by the standalone UnityAssetExtractor into GameObject/
+  // prefab nodes + asset-wiring edges.
+  'unity_yaml',
   'unknown',
 ] as const;
 
