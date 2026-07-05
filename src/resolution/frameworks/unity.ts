@@ -1,0 +1,912 @@
+/**
+ * Unity Framework Resolver
+ *
+ * Tier 1 is code-only. It keeps Unity host-invoked C# surfaces live without
+ * importing scene/prefab/meta snapshot facts into CodeGraph.
+ */
+
+import { Node } from '../../types';
+import {
+  FrameworkExtractionResult,
+  FrameworkResolver,
+  ResolutionContext,
+  ResolvedRef,
+  UnresolvedRef,
+} from '../types';
+import { stripCommentsForRegex } from '../strip-comments';
+import invocationTable from './unity-invocation-table.json';
+
+interface HostBaseRule {
+  hostInvokedMethods: string[];
+  note?: string;
+}
+
+interface MethodAttributeRule {
+  attribute: string;
+  requiresStatic?: boolean;
+  requiresInstance?: boolean;
+  optionalTypeofReference?: boolean;
+}
+
+interface TypeReferenceAttributeRule {
+  attribute: string;
+}
+
+interface InvocationTable {
+  hostInvokedBases: Record<string, HostBaseRule | string>;
+  serializationAttributes: { attributes: string[] };
+  attributeEntryPoints: {
+    methodAttributes: MethodAttributeRule[];
+    classAttributes: Array<{ attribute: string }>;
+  };
+  typeReferenceAttributes: { attributes: TypeReferenceAttributeRule[] };
+}
+
+interface ClassBlock {
+  name: string;
+  bases: string[];
+  attributes: AttributeUse[];
+  body: string;
+  rawBody: string;
+  bodyOffset: number;
+  filePath: string;
+  hostBase: string | null;
+}
+
+interface MethodDecl {
+  name: string;
+  isStatic: boolean;
+  attributes: AttributeUse[];
+  line: number;
+  index: number;
+  bodyStart: number;
+  bodyEnd: number;
+  canEmit: boolean;
+}
+
+interface MemberDecl {
+  name: string;
+  typeName: string;
+  attributes: AttributeUse[];
+  line: number;
+}
+
+interface AttributeUse {
+  rawName: string;
+  name: string;
+  args: string;
+  target: string | null;
+}
+
+const TABLE = invocationTable as unknown as InvocationTable;
+const HOST_BASE_RULES = Object.fromEntries(
+  Object.entries(TABLE.hostInvokedBases).filter(([, value]) => typeof value !== 'string')
+) as Record<string, HostBaseRule>;
+
+const HOST_BASES = new Set(Object.keys(HOST_BASE_RULES));
+const STATIC_HOST_BASES = new Set(['AssetModificationProcessor']);
+const SERIALIZATION_ATTRIBUTES = new Set(TABLE.serializationAttributes.attributes);
+const METHOD_ATTRIBUTES = TABLE.attributeEntryPoints.methodAttributes;
+const CLASS_ATTRIBUTES = new Set(TABLE.attributeEntryPoints.classAttributes.map((a) => a.attribute));
+const TYPE_REFERENCE_ATTRIBUTES = new Set(TABLE.typeReferenceAttributes.attributes.map((a) => a.attribute));
+
+const HOST_REF_PREFIX = 'unity:host:';
+const FIELD_REF_PREFIX = 'unity:field:';
+const METHOD_REF_PREFIX = 'unity:method:';
+
+const BUILTIN_TYPE_NAMES = new Set([
+  'bool',
+  'byte',
+  'char',
+  'decimal',
+  'double',
+  'float',
+  'int',
+  'long',
+  'object',
+  'sbyte',
+  'short',
+  'string',
+  'uint',
+  'ulong',
+  'ushort',
+  'void',
+  'Boolean',
+  'Byte',
+  'Char',
+  'Decimal',
+  'Double',
+  'Single',
+  'Int32',
+  'Int64',
+  'Object',
+  'String',
+  'UInt32',
+  'UInt64',
+  'Vector2',
+  'Vector3',
+  'Vector4',
+  'Quaternion',
+  'GameObject',
+  'Transform',
+  'Rigidbody',
+  'Rigidbody2D',
+  'Collider',
+  'Collider2D',
+  'MonoBehaviour',
+  'ScriptableObject',
+]);
+
+function lineNumberAt(content: string, index: number): number {
+  return content.slice(0, index).split('\n').length;
+}
+
+function normalizeAttributeName(name: string): string {
+  const last = name.split('.').pop() || name;
+  return last.endsWith('Attribute') ? last.slice(0, -'Attribute'.length) : last;
+}
+
+function parseAttributes(text: string): AttributeUse[] {
+  const attrs: AttributeUse[] = [];
+  const attrRegex = /\[([^\]]+)\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = attrRegex.exec(text)) !== null) {
+    let body = match[1]!.trim();
+    let target: string | null = null;
+    const targetMatch = /^([A-Za-z_]\w*)\s*:\s*(.+)$/.exec(body);
+    if (targetMatch) {
+      target = targetMatch[1]!;
+      body = targetMatch[2]!.trim();
+    }
+    const nameMatch = /^([A-Za-z_][\w.]*)/.exec(body);
+    if (!nameMatch) continue;
+    const rawName = nameMatch[1]!;
+    const parenIndex = body.indexOf('(');
+    const args = parenIndex === -1 ? '' : body.slice(parenIndex + 1, body.lastIndexOf(')'));
+    attrs.push({ rawName, name: normalizeAttributeName(rawName), args, target });
+  }
+  return attrs;
+}
+
+function leadingAttributes(content: string, index: number): AttributeUse[] {
+  const prefix = content.slice(Math.max(0, index - 1000), index);
+  const match = /((?:[ \t]*\[[^\]]+\][ \t]*(?:\r?\n)?)+)[ \t]*$/.exec(prefix);
+  return match ? parseAttributes(match[1]!) : [];
+}
+
+function maskStringLiterals(content: string): string {
+  const chars = content.split('');
+  for (let i = 0; i < chars.length; i++) {
+    const quote = chars[i];
+    const prev = i > 0 ? chars[i - 1] : '';
+    if (quote !== '"' && quote !== "'") continue;
+    const isVerbatim = prev === '@' || (prev === '"' && i > 1 && chars[i - 2] === '@');
+    chars[i] = ' ';
+    let j = i + 1;
+    while (j < chars.length) {
+      const c = chars[j];
+      chars[j] = ' ';
+      if (c === quote) {
+        if (isVerbatim && chars[j + 1] === quote) {
+          chars[j + 1] = ' ';
+          j += 2;
+          continue;
+        }
+        break;
+      }
+      if (!isVerbatim && c === '\\') {
+        if (j + 1 < chars.length) chars[j + 1] = ' ';
+        j += 2;
+        continue;
+      }
+      j++;
+    }
+    i = j;
+  }
+  return chars.join('');
+}
+
+function findMatchingBrace(content: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < content.length; i++) {
+    const c = content[i];
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function findMatchingParen(content: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < content.length; i++) {
+    const c = content[i];
+    if (c === '(') depth++;
+    else if (c === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === '(' || c === '[' || c === '<') depth++;
+    else if (c === ')' || c === ']' || c === '>') depth = Math.max(0, depth - 1);
+    else if (c === ',' && depth === 0) {
+      parts.push(text.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+function topLevelAt(body: string, index: number): boolean {
+  let depth = 0;
+  for (let i = 0; i < index; i++) {
+    const c = body[i];
+    if (c === '{') depth++;
+    else if (c === '}') depth = Math.max(0, depth - 1);
+  }
+  return depth === 0;
+}
+
+function stripGenericSuffix(base: string): string {
+  const generic = base.indexOf('<');
+  return (generic === -1 ? base : base.slice(0, generic)).trim();
+}
+
+function resolveBaseName(base: string, aliases: Map<string, string>): string {
+  let value = stripGenericSuffix(base.trim());
+  const dot = value.indexOf('.');
+  if (dot !== -1) {
+    const head = value.slice(0, dot);
+    const alias = aliases.get(head);
+    if (alias) value = `${alias}${value.slice(dot)}`;
+  } else {
+    value = aliases.get(value) || value;
+  }
+  return value.split('.').pop() || value;
+}
+
+function parseAliases(content: string): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const regex = /^\s*using\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_][\w.]*)\s*;/gm;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) {
+    aliases.set(match[1]!, match[2]!);
+  }
+  return aliases;
+}
+
+function parseClassBlocks(content: string, filePath: string): ClassBlock[] {
+  const noComments = stripCommentsForRegex(content, 'csharp');
+  const safe = maskStringLiterals(noComments);
+  const aliases = parseAliases(safe);
+  const classes: ClassBlock[] = [];
+  const classRegex = /(?:\b(?:public|private|protected|internal|sealed|abstract|partial|static|new)\s+)*class\s+([A-Za-z_]\w*)(?:\s*:\s*([^{]+))?\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = classRegex.exec(safe)) !== null) {
+    const openBrace = safe.indexOf('{', match.index);
+    if (openBrace === -1) continue;
+    const closeBrace = findMatchingBrace(safe, openBrace);
+    if (closeBrace === -1) continue;
+    const bases = splitTopLevel(match[2] || '').map((b) => resolveBaseName(b, aliases));
+    classes.push({
+      name: match[1]!,
+      bases,
+      attributes: leadingAttributes(safe, match.index),
+      body: safe.slice(openBrace + 1, closeBrace),
+      rawBody: noComments.slice(openBrace + 1, closeBrace),
+      bodyOffset: openBrace + 1,
+      filePath,
+      hostBase: null,
+    });
+  }
+
+  const directHostByName = new Map<string, string>();
+  for (const cls of classes) {
+    const direct = cls.bases.find((b) => HOST_BASES.has(b));
+    if (direct) directHostByName.set(cls.name, direct);
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const cls of classes) {
+      if (directHostByName.has(cls.name)) continue;
+      const inherited = cls.bases.find((b) => directHostByName.has(b));
+      if (inherited) {
+        directHostByName.set(cls.name, directHostByName.get(inherited)!);
+        changed = true;
+      }
+    }
+  }
+
+  return classes.map((cls) => {
+    const direct = cls.bases.find((b) => HOST_BASES.has(b));
+    const chained = cls.bases.find((b) => directHostByName.has(b));
+    return {
+      ...cls,
+      hostBase: direct || (chained ? directHostByName.get(chained)! : null),
+    };
+  });
+}
+
+function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
+  const methods: MethodDecl[] = [];
+  const methodRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = methodRegex.exec(cls.body)) !== null) {
+    if (!topLevelAt(cls.body, match.index)) continue;
+    const header = match[0]!;
+    const name = match[2]!;
+    const openBrace = cls.body.indexOf('{', match.index);
+    const closeBrace = openBrace === -1 ? -1 : findMatchingBrace(cls.body, openBrace);
+    methods.push({
+      name,
+      isStatic: /\bstatic\b/.test(header),
+      attributes: parseAttributes(match[1] || ''),
+      line: lineNumberAt(originalContent, cls.bodyOffset + match.index),
+      index: match.index,
+      bodyStart: openBrace,
+      bodyEnd: closeBrace,
+      canEmit: true,
+    });
+  }
+
+  const expressionRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*=>[^;{}]*;/g;
+  while ((match = expressionRegex.exec(cls.body)) !== null) {
+    if (!topLevelAt(cls.body, match.index)) continue;
+    const header = match[0]!;
+    methods.push({
+      name: match[2]!,
+      isStatic: /\bstatic\b/.test(header),
+      attributes: parseAttributes(match[1] || ''),
+      line: lineNumberAt(originalContent, cls.bodyOffset + match.index),
+      index: match.index,
+      bodyStart: -1,
+      bodyEnd: -1,
+      canEmit: true,
+    });
+  }
+
+  const declarationRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern|abstract)\s+)*[A-Za-z_][\w<>,\s\[\]?.]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;/g;
+  while ((match = declarationRegex.exec(cls.body)) !== null) {
+    if (!topLevelAt(cls.body, match.index)) continue;
+    const header = match[0]!;
+    methods.push({
+      name: match[2]!,
+      isStatic: /\bstatic\b/.test(header),
+      attributes: parseAttributes(match[1] || ''),
+      line: lineNumberAt(originalContent, cls.bodyOffset + match.index),
+      index: match.index,
+      bodyStart: -1,
+      bodyEnd: -1,
+      canEmit: false,
+    });
+  }
+
+  return methods;
+}
+
+function parseFields(cls: ClassBlock, originalContent: string): MemberDecl[] {
+  const fields: MemberDecl[] = [];
+  const fieldRegex = /((?:\s*\[[^\]]+\]\s*)+)\s*(?:(?:public|private|protected|internal|static|readonly|volatile|new)\s+)*([A-Za-z_][\w.<>]*)\s+([A-Za-z_]\w*)\s*(?:=[^;]*)?;/g;
+  let match: RegExpExecArray | null;
+  while ((match = fieldRegex.exec(cls.body)) !== null) {
+    if (!topLevelAt(cls.body, match.index)) continue;
+    const attrs = cls.rawBody.slice(match.index, match.index + (match[1] || '').length);
+    fields.push({
+      name: match[3]!,
+      typeName: match[2]!,
+      attributes: parseAttributes(attrs),
+      line: lineNumberAt(originalContent, cls.bodyOffset + match.index),
+    });
+  }
+  return fields;
+}
+
+function parseProperties(cls: ClassBlock, originalContent: string): MemberDecl[] {
+  const properties: MemberDecl[] = [];
+  const propRegex = /((?:\s*\[[^\]]+\]\s*)+)\s*(?:(?:public|private|protected|internal|static|new)\s+)*([A-Za-z_][\w.<>]*)\s+([A-Za-z_]\w*)\s*\{/g;
+  let match: RegExpExecArray | null;
+  while ((match = propRegex.exec(cls.body)) !== null) {
+    if (!topLevelAt(cls.body, match.index)) continue;
+    const attrs = cls.rawBody.slice(match.index, match.index + (match[1] || '').length);
+    properties.push({
+      name: match[3]!,
+      typeName: match[2]!,
+      attributes: parseAttributes(attrs),
+      line: lineNumberAt(originalContent, cls.bodyOffset + match.index),
+    });
+  }
+  return properties;
+}
+
+function isLocalTypeReference(typeName: string): boolean {
+  const clean = typeName.replace(/\[\]$/, '').replace(/\?$/, '');
+  if (!/^[A-ZI][A-Za-z0-9_]*$/.test(clean)) return false;
+  if (BUILTIN_TYPE_NAMES.has(clean)) return false;
+  if (clean.startsWith('System.') || clean.startsWith('UnityEngine.')) return false;
+  return true;
+}
+
+function localTypeFromTypeofArgs(args: string): string[] {
+  const refs: string[] = [];
+  const regex = /typeof\s*\(\s*([A-Za-z_][\w.]*)\s*\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(args)) !== null) {
+    const typeName = match[1]!;
+    const simple = typeName.split('.').pop() || typeName;
+    if (isLocalTypeReference(typeName) || isLocalTypeReference(simple)) refs.push(simple);
+  }
+  return refs;
+}
+
+function makeRouteNode(filePath: string, line: number, name: string): Node {
+  return {
+    id: `route:unity:${filePath}:${line}:${name}`,
+    kind: 'route',
+    name,
+    qualifiedName: `${filePath}::${name}`,
+    filePath,
+    startLine: line,
+    endLine: line,
+    startColumn: 0,
+    endColumn: 0,
+    language: 'csharp',
+    updatedAt: Date.now(),
+  };
+}
+
+function makeRef(node: Node, referenceName: string): UnresolvedRef {
+  return {
+    fromNodeId: node.id,
+    referenceName,
+    referenceKind: 'references',
+    line: node.startLine,
+    column: 0,
+    filePath: node.filePath,
+    language: 'csharp',
+  };
+}
+
+function pushNodeRef(
+  result: FrameworkExtractionResult,
+  seenNodes: Set<string>,
+  seenRefs: Set<string>,
+  filePath: string,
+  line: number,
+  nodeName: string,
+  refNames: string[]
+): void {
+  if (!seenNodes.has(nodeName)) {
+    const node = makeRouteNode(filePath, line, nodeName);
+    result.nodes.push(node);
+    seenNodes.add(nodeName);
+    for (const refName of refNames) {
+      const key = `${node.id}:${refName}`;
+      if (!seenRefs.has(key)) {
+        result.references.push(makeRef(node, refName));
+        seenRefs.add(key);
+      }
+    }
+    return;
+  }
+
+  for (const node of result.nodes) {
+    if (node.name !== nodeName) continue;
+    for (const refName of refNames) {
+      const key = `${node.id}:${refName}`;
+      if (!seenRefs.has(key)) {
+        result.references.push(makeRef(node, refName));
+        seenRefs.add(key);
+      }
+    }
+  }
+}
+
+function findAttribute(attrs: AttributeUse[], name: string): AttributeUse | undefined {
+  return attrs.find((a) => a.name === name);
+}
+
+function hasSerializationAttribute(attrs: AttributeUse[]): boolean {
+  return attrs.some((a) => SERIALIZATION_ATTRIBUTES.has(a.name));
+}
+
+function extractMethodNameArg(arg: string): string | null {
+  const trimmed = arg.trim();
+  const literal = /^"([A-Za-z_]\w*)"$/.exec(trimmed);
+  if (literal) return literal[1]!;
+  const nameof = /^nameof\s*\(\s*([A-Za-z_]\w*)\s*\)$/.exec(trimmed);
+  return nameof ? nameof[1]! : null;
+}
+
+function firstArgument(args: string): string {
+  return splitTopLevel(args)[0] || '';
+}
+
+function secondArgument(args: string): string {
+  return splitTopLevel(args)[1] || '';
+}
+
+function uniqueMethod(methods: MethodDecl[], name: string): MethodDecl | null {
+  const matches = methods.filter((m) => m.name === name);
+  if (matches.length !== 1) return null;
+  return matches[0]!.canEmit ? matches[0]! : null;
+}
+
+function isInsideTopLevelMethod(methods: MethodDecl[], index: number): boolean {
+  return methods.some((method) => method.bodyStart !== -1 && method.bodyEnd !== -1 && index > method.bodyStart && index < method.bodyEnd);
+}
+
+function previousNonWhitespace(text: string, index: number): number {
+  for (let i = index; i >= 0; i--) {
+    if (!/\s/.test(text[i]!)) return i;
+  }
+  return -1;
+}
+
+function readIdentifierEndingAt(text: string, index: number): { name: string; start: number } | null {
+  if (index < 0 || !/[A-Za-z0-9_]/.test(text[index]!)) return null;
+  let start = index;
+  while (start >= 0 && /[A-Za-z0-9_]/.test(text[start]!)) start--;
+  const name = text.slice(start + 1, index + 1);
+  return /^[A-Za-z_]\w*$/.test(name) ? { name, start: start + 1 } : null;
+}
+
+function hasNoMemberPrefix(text: string, identifierStart: number): boolean {
+  const before = previousNonWhitespace(text, identifierStart - 1);
+  return before === -1 || (text[before] !== '.' && text[before] !== '?' && text[before] !== ')' && text[before] !== ']');
+}
+
+function allowsStringCallReceiver(text: string, callStart: number, family: string): boolean {
+  const beforeCall = previousNonWhitespace(text, callStart - 1);
+  if (beforeCall === -1 || text[beforeCall] !== '.') {
+    return hasNoMemberPrefix(text, callStart);
+  }
+
+  let receiverEnd = previousNonWhitespace(text, beforeCall - 1);
+  if (receiverEnd === -1 || text[receiverEnd] === '?') return false;
+  const receiver = readIdentifierEndingAt(text, receiverEnd);
+  if (!receiver) return false;
+  const beforeReceiver = previousNonWhitespace(text, receiver.start - 1);
+
+  if (receiver.name === 'this') {
+    return beforeReceiver === -1 || (text[beforeReceiver] !== '.' && text[beforeReceiver] !== '?' && text[beforeReceiver] !== ')' && text[beforeReceiver] !== ']');
+  }
+
+  if (family !== 'SendMessage' || receiver.name !== 'gameObject') return false;
+  if (beforeReceiver === -1 || text[beforeReceiver] !== '.') return true;
+
+  let ownerEnd = previousNonWhitespace(text, beforeReceiver - 1);
+  if (ownerEnd === -1 || text[ownerEnd] === '?') return false;
+  const owner = readIdentifierEndingAt(text, ownerEnd);
+  if (!owner || owner.name !== 'this') return false;
+  const beforeOwner = previousNonWhitespace(text, owner.start - 1);
+  return beforeOwner === -1 || (text[beforeOwner] !== '.' && text[beforeOwner] !== '?' && text[beforeOwner] !== ')' && text[beforeOwner] !== ']');
+}
+
+function processStringCalls(
+  result: FrameworkExtractionResult,
+  seenNodes: Set<string>,
+  seenRefs: Set<string>,
+  cls: ClassBlock,
+  methods: MethodDecl[]
+): void {
+  if (!cls.hostBase) return;
+  const families: Array<{
+    nodeFamily: string;
+    regex: RegExp;
+  }> = [
+    {
+      nodeFamily: 'SendMessage',
+      regex: /\b(SendMessage|BroadcastMessage|SendMessageUpwards)\s*\(/g,
+    },
+    {
+      nodeFamily: 'Invoke',
+      regex: /\b(Invoke|InvokeRepeating|CancelInvoke|IsInvoking)\s*\(/g,
+    },
+    {
+      nodeFamily: 'StartCoroutine',
+      regex: /\b(StartCoroutine|StopCoroutine)\s*\(/g,
+    },
+  ];
+
+  for (const family of families) {
+    let match: RegExpExecArray | null;
+    while ((match = family.regex.exec(cls.body)) !== null) {
+      if (!isInsideTopLevelMethod(methods, match.index)) continue;
+      if (!allowsStringCallReceiver(cls.body, match.index, family.nodeFamily)) continue;
+      const open = cls.body.indexOf('(', match.index);
+      const close = findMatchingParen(cls.body, open);
+      if (close === -1) continue;
+      const methodName = extractMethodNameArg(firstArgument(cls.rawBody.slice(open + 1, close)));
+      if (!methodName) continue;
+      const target = uniqueMethod(methods, methodName);
+      if (!target) continue;
+      pushNodeRef(
+        result,
+        seenNodes,
+        seenRefs,
+        cls.filePath,
+        target.line,
+        `UNITY string-invoke ${family.nodeFamily} ${cls.name}.${methodName}`,
+        [`${METHOD_REF_PREFIX}${cls.name}.${methodName}`]
+      );
+    }
+  }
+}
+
+function processContextMenuItems(
+  result: FrameworkExtractionResult,
+  seenNodes: Set<string>,
+  seenRefs: Set<string>,
+  cls: ClassBlock,
+  methods: MethodDecl[],
+  fields: MemberDecl[]
+): void {
+  if (!cls.hostBase) return;
+  for (const field of fields) {
+    for (const attr of field.attributes) {
+      if (attr.name !== 'ContextMenuItem') continue;
+      const methodName = extractMethodNameArg(secondArgument(attr.args));
+      if (!methodName) continue;
+      const target = uniqueMethod(methods, methodName);
+      if (!target) continue;
+      pushNodeRef(
+        result,
+        seenNodes,
+        seenRefs,
+        cls.filePath,
+        field.line,
+        `UNITY string-invoke ContextMenuItem ${cls.name}.${methodName}`,
+        [`${METHOD_REF_PREFIX}${cls.name}.${methodName}`]
+      );
+    }
+  }
+}
+
+function processClass(
+  result: FrameworkExtractionResult,
+  seenNodes: Set<string>,
+  seenRefs: Set<string>,
+  cls: ClassBlock,
+  originalContent: string
+): void {
+  const methods = parseMethods(cls, originalContent);
+  const fields = parseFields(cls, originalContent);
+  const properties = parseProperties(cls, originalContent);
+
+  if (cls.hostBase) {
+    const rule = HOST_BASE_RULES[cls.hostBase];
+    if (rule) {
+      const hostMethods = new Set(rule.hostInvokedMethods);
+      for (const method of methods) {
+        if (!method.canEmit) continue;
+        if (!hostMethods.has(method.name)) continue;
+        if (STATIC_HOST_BASES.has(cls.hostBase) && !method.isStatic) continue;
+        pushNodeRef(
+          result,
+          seenNodes,
+          seenRefs,
+          cls.filePath,
+          method.line,
+          `UNITY ${cls.hostBase}.${method.name} ${cls.name}.${method.name}`,
+          [`${HOST_REF_PREFIX}${cls.name}.${method.name}`]
+        );
+      }
+    }
+  }
+
+  for (const attrName of CLASS_ATTRIBUTES) {
+    if (!findAttribute(cls.attributes, attrName)) continue;
+    pushNodeRef(
+      result,
+      seenNodes,
+      seenRefs,
+      cls.filePath,
+      lineNumberAt(originalContent, cls.bodyOffset),
+      `UNITY attribute ${attrName} ${cls.name}`,
+      [cls.name]
+    );
+  }
+
+  for (const method of methods) {
+    if (!method.canEmit) continue;
+    for (const rule of METHOD_ATTRIBUTES) {
+      const attr = findAttribute(method.attributes, rule.attribute);
+      if (!attr) continue;
+      if (rule.requiresStatic && !method.isStatic) continue;
+      if (rule.requiresInstance && method.isStatic) continue;
+      const refs = [`${METHOD_REF_PREFIX}${cls.name}.${method.name}`];
+      if (rule.optionalTypeofReference) refs.push(...localTypeFromTypeofArgs(attr.args));
+      pushNodeRef(
+        result,
+        seenNodes,
+        seenRefs,
+        cls.filePath,
+        method.line,
+        `UNITY attribute ${rule.attribute} ${cls.name}.${method.name}`,
+        refs
+      );
+    }
+  }
+
+  for (const attrName of TYPE_REFERENCE_ATTRIBUTES) {
+    const attr = findAttribute(cls.attributes, attrName);
+    if (!attr) continue;
+    const refs = localTypeFromTypeofArgs(attr.args);
+    if (refs.length === 0) continue;
+    pushNodeRef(
+      result,
+      seenNodes,
+      seenRefs,
+      cls.filePath,
+      lineNumberAt(originalContent, cls.bodyOffset),
+      `UNITY type-ref ${attrName} ${cls.name}`,
+      refs
+    );
+  }
+
+  for (const field of fields) {
+    if (!hasSerializationAttribute(field.attributes)) continue;
+    const refs = [`${FIELD_REF_PREFIX}${cls.name}.${field.name}`];
+    const simple = field.typeName.split('.').pop() || field.typeName;
+    if (isLocalTypeReference(field.typeName) || isLocalTypeReference(simple)) refs.push(simple);
+    pushNodeRef(
+      result,
+      seenNodes,
+      seenRefs,
+      cls.filePath,
+      field.line,
+      `UNITY serialized field ${cls.name}.${field.name}`,
+      refs
+    );
+  }
+
+  for (const prop of properties) {
+    const fieldSerialize = prop.attributes.some(
+      (a) => a.target === 'field' && SERIALIZATION_ATTRIBUTES.has(a.name)
+    );
+    if (!fieldSerialize) continue;
+    const refs = [`${FIELD_REF_PREFIX}${cls.name}.${prop.name}`];
+    const simple = prop.typeName.split('.').pop() || prop.typeName;
+    if (isLocalTypeReference(prop.typeName) || isLocalTypeReference(simple)) refs.push(simple);
+    pushNodeRef(
+      result,
+      seenNodes,
+      seenRefs,
+      cls.filePath,
+      prop.line,
+      `UNITY serialized property ${cls.name}.${prop.name}`,
+      refs
+    );
+  }
+
+  processStringCalls(result, seenNodes, seenRefs, cls, methods);
+  processContextMenuItems(result, seenNodes, seenRefs, cls, methods, fields);
+}
+
+function hasConcreteUnitySourceSignal(content: string): boolean {
+  const safe = maskStringLiterals(stripCommentsForRegex(content, 'csharp'));
+  if (/\bclass\s+[A-Za-z_]\w*\s*:\s*(?:UnityEngine\.)?(?:MonoBehaviour|ScriptableObject|StateMachineBehaviour)\b/.test(safe)) return true;
+  if (/\bclass\s+[A-Za-z_]\w*\s*:\s*(?:UnityEditor\.)?(?:Editor|EditorWindow|PropertyDrawer|DecoratorDrawer|AssetPostprocessor|AssetModificationProcessor)\b/.test(safe)) return true;
+  if (/\[(?:UnityEngine\.|UnityEditor\.)?(?:SerializeField|SerializeReference|RuntimeInitializeOnLoadMethod|InitializeOnLoadMethod|MenuItem|ContextMenu|CreateAssetMenu|AddComponentMenu|RequireComponent|CustomEditor|CustomPropertyDrawer|DrawGizmo)(?:Attribute)?\b/.test(safe)) return true;
+  return false;
+}
+
+function pathsEqual(left: string, right: string): boolean {
+  return left.replace(/\\/g, '/') === right.replace(/\\/g, '/');
+}
+
+function matchesScopedSymbol(node: Node, scoped: string): boolean {
+  const values = [node.id, node.qualifiedName];
+  return values.some(
+    (value) =>
+      value === scoped ||
+      value.endsWith(`.${scoped}`) ||
+      value.endsWith(`::${scoped}`) ||
+      value.endsWith(`/${scoped}`) ||
+      value.endsWith(`:${scoped}`)
+  );
+}
+
+function resolveSynthetic(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  const prefix = [HOST_REF_PREFIX, FIELD_REF_PREFIX, METHOD_REF_PREFIX].find((p) =>
+    ref.referenceName.startsWith(p)
+  );
+  if (!prefix) return null;
+  const target = ref.referenceName.slice(prefix.length);
+  const dot = target.lastIndexOf('.');
+  if (dot === -1) return null;
+  const className = target.slice(0, dot);
+  const memberName = target.slice(dot + 1);
+  const nodes = context.getNodesInFile(ref.filePath);
+  for (const cls of context.getNodesByName(className)) {
+    if (!pathsEqual(cls.filePath, ref.filePath)) continue;
+    const contained = nodes.find(
+      (node) =>
+        node.id !== cls.id &&
+        node.name === memberName &&
+        pathsEqual(node.filePath, cls.filePath) &&
+        node.startLine >= cls.startLine &&
+        node.startLine <= cls.endLine
+    );
+    if (contained) {
+      return {
+        original: ref,
+        targetNodeId: contained.id,
+        confidence: 1,
+        resolvedBy: 'framework',
+      };
+    }
+  }
+
+  const scoped = `${className}.${memberName}`;
+  const match = nodes.find((node) => node.name === memberName && matchesScopedSymbol(node, scoped));
+  if (!match) return null;
+  return {
+    original: ref,
+    targetNodeId: match.id,
+    confidence: 1,
+    resolvedBy: 'framework',
+  };
+}
+
+export const unityResolver: FrameworkResolver = {
+  name: 'unity',
+  languages: ['csharp'],
+
+  detect(context: ResolutionContext): boolean {
+    if (context.fileExists('ProjectSettings/ProjectVersion.txt')) return true;
+    const files = context.getAllFiles();
+    if (files.some((f) => f.endsWith('.asmdef'))) return true;
+    if (files.some((f) => f.endsWith('.meta')) && files.some((f) => f.startsWith('Assets/') || f.startsWith('ProjectSettings/'))) return true;
+    const manifestFiles = new Set(['Packages/manifest.json', ...files.filter((f) => f.endsWith('Packages/manifest.json'))]);
+    for (const file of manifestFiles) {
+      const manifest = context.readFile(file);
+      if (manifest?.includes('com.unity.')) return true;
+    }
+    for (const file of files) {
+      if (!file.endsWith('.cs')) continue;
+      const content = context.readFile(file);
+      if (content && hasConcreteUnitySourceSignal(content)) return true;
+    }
+    return false;
+  },
+
+  claimsReference(name: string): boolean {
+    return (
+      name.startsWith(HOST_REF_PREFIX) ||
+      name.startsWith(FIELD_REF_PREFIX) ||
+      name.startsWith(METHOD_REF_PREFIX)
+    );
+  },
+
+  resolve(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+    if (ref.language !== 'csharp') return null;
+    return resolveSynthetic(ref, context);
+  },
+
+  extract(filePath: string, content: string): FrameworkExtractionResult {
+    if (!filePath.endsWith('.cs')) return { nodes: [], references: [] };
+    const result: FrameworkExtractionResult = { nodes: [], references: [] };
+    const seenNodes = new Set<string>();
+    const seenRefs = new Set<string>();
+    const classes = parseClassBlocks(content, filePath);
+    for (const cls of classes) {
+      processClass(result, seenNodes, seenRefs, cls, content);
+    }
+    return result;
+  },
+};

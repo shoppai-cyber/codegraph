@@ -15,6 +15,7 @@ import { svelteResolver } from './svelte';
 import { vueResolver } from './vue';
 import { astroResolver } from './astro';
 import { djangoResolver, flaskResolver, fastapiResolver } from './python';
+import { blenderResolver } from './blender';
 import { railsResolver } from './ruby';
 import { springResolver } from './java';
 import { playResolver } from './play';
@@ -22,6 +23,7 @@ import { goResolver } from './go';
 import { goframeResolver } from './goframe';
 import { rustResolver } from './rust';
 import { aspnetResolver } from './csharp';
+import { unityResolver } from './unity';
 import { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 import { swiftObjcBridgeResolver } from './swift-objc';
 import { reactNativeBridgeResolver } from './react-native';
@@ -46,6 +48,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   djangoResolver,
   flaskResolver,
   fastapiResolver,
+  // Blender add-ons — host-invoked registration/callback surfaces
+  blenderResolver,
   // Ruby
   railsResolver,
   // Java
@@ -58,6 +62,7 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   rustResolver,
   // C#
   aspnetResolver,
+  unityResolver,
   // Swift
   swiftUIResolver,
   uikitResolver,
@@ -134,6 +139,7 @@ export { svelteResolver } from './svelte';
 export { vueResolver } from './vue';
 export { astroResolver } from './astro';
 export { djangoResolver, flaskResolver, fastapiResolver } from './python';
+export { blenderResolver } from './blender';
 export { railsResolver } from './ruby';
 export { springResolver } from './java';
 export { playResolver } from './play';
@@ -141,6 +147,7 @@ export { goResolver } from './go';
 export { goframeResolver } from './goframe';
 export { rustResolver } from './rust';
 export { aspnetResolver } from './csharp';
+export { unityResolver } from './unity';
 export { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 export { swiftObjcBridgeResolver } from './swift-objc';
 export { reactNativeBridgeResolver } from './react-native';

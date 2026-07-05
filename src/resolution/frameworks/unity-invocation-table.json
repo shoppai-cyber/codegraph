@@ -1,0 +1,369 @@
+{
+  "$schema": "https://codegraph.dev/schemas/unity-invocation-table.v0.json",
+  "name": "unity-runtime-invocation-table",
+  "version": "0.2.0",
+  "target": "Unity 2021 LTS – 6.x; runtime + editor C# scripting",
+  "status": "Fable-reviewed v1 scope. Consumed lists are grounded in the local Unity 6.5 corpus and FABLE-SCOPE-DECISIONS.md; pending rows are explicitly marked or quarantined. Runtime consumption must stay inside the consumed sections.",
+  "consumed": {
+    "note": "Sections here are read by unity.ts at runtime; the fields consumed are named per section. Everything under catalogNotes is documentation-only provenance. This mirrors blender-invocation-table.json's consumed/catalogNotes split.",
+    "detection": "project-level sufficient markers plus source evidence rules used by detect() to recognize a Unity project",
+    "hostInvokedBases": "key set (the host-invoked-base whitelist); <base>.hostInvokedMethods (engine/editor calls these by reflection, so they look dead)",
+    "serializationAttributes": "attribute set → field kept live + its declared type emits a references edge",
+    "attributeEntryPoints": "attribute → the decorated method/class is a host-invoked entry point (kept live); menu/path string captured where present",
+    "typeReferenceAttributes": "attribute → typeof(X)/type argument emits a references edge to X",
+    "stringInvokedCallSites": "callsite API → its string-literal method-name argument links to a sibling method (references)"
+  },
+  "sourcePriority": [
+    "kb/gamedev/unity (to be built — Unity Scripting API + Manual mirror)",
+    "Unity MonoBehaviour message list (official Scripting API)",
+    "real-project probes (Unity-MP-Course-Project + small/med/large validation repos)",
+    "codegraph repository source (blender.ts pattern)",
+    "official Unity documentation"
+  ],
+  "detection": {
+    "note": "detect() returns true when the C# project is a Unity project. Project/file-layout markers are sufficient; source fallback requires concrete Unity base/attribute evidence. Bare using UnityEngine/UnityEditor is supporting context only and is not independently sufficient.",
+    "markers": [
+      "a file named ProjectSettings/ProjectVersion.txt exists in the project",
+      "Packages/manifest.json references com.unity.* packages",
+      "*.asmdef assembly-definition files present",
+      "a .cs file contains a concrete Unity host base or v1 Unity attribute in source",
+      "`using UnityEngine;` or `using UnityEditor;` may support detection only when paired with concrete source evidence",
+      ".meta sidecar files accompany source assets"
+    ]
+  },
+  "hostInvokedBases": {
+    "note": "A class is host-invoked only when its class-statement base is structurally one of these. Magic method names on non-host classes emit nothing. Method sets are closed, docs-grounded v1 sets; no convention or substring matching.",
+    "MonoBehaviour": {
+      "hostInvokedMethods": [
+        "Awake",
+        "FixedUpdate",
+        "LateUpdate",
+        "OnAnimatorIK",
+        "OnAnimatorMove",
+        "OnApplicationFocus",
+        "OnApplicationPause",
+        "OnApplicationQuit",
+        "OnAudioFilterRead",
+        "OnBecameInvisible",
+        "OnBecameVisible",
+        "OnChildRectTransformDimensionsChange",
+        "OnCollisionEnter",
+        "OnCollisionEnter2D",
+        "OnCollisionExit",
+        "OnCollisionExit2D",
+        "OnCollisionStay",
+        "OnCollisionStay2D",
+        "OnControllerColliderHit",
+        "OnDestroy",
+        "OnDisable",
+        "OnDrawGizmos",
+        "OnDrawGizmosSelected",
+        "OnEnable",
+        "OnGUI",
+        "OnJointBreak",
+        "OnJointBreak2D",
+        "OnMouseDown",
+        "OnMouseDrag",
+        "OnMouseEnter",
+        "OnMouseExit",
+        "OnMouseOver",
+        "OnMouseUp",
+        "OnMouseUpAsButton",
+        "OnParticleCollision",
+        "OnParticleSystemStopped",
+        "OnParticleTrigger",
+        "OnParticleUpdateJobScheduled",
+        "OnPostRender",
+        "OnPreCull",
+        "OnPreRender",
+        "OnRenderImage",
+        "OnRenderObject",
+        "OnTransformChildrenChanged",
+        "OnTransformParentChanged",
+        "OnTriggerEnter",
+        "OnTriggerEnter2D",
+        "OnTriggerExit",
+        "OnTriggerExit2D",
+        "OnTriggerStay",
+        "OnTriggerStay2D",
+        "OnValidate",
+        "OnWillRenderObject",
+        "Reset",
+        "Start",
+        "Update"
+      ],
+      "detection": "base list includes UnityEngine.MonoBehaviour; same-file base chains are allowed when proven in-file; cross-file base chains emit nothing"
+    },
+    "ScriptableObject": {
+      "hostInvokedMethods": ["Awake", "OnDestroy", "OnDisable", "OnEnable", "OnValidate", "Reset"],
+      "detection": "base includes UnityEngine.ScriptableObject"
+    },
+    "StateMachineBehaviour": {
+      "hostInvokedMethods": [
+        "OnStateEnter",
+        "OnStateExit",
+        "OnStateIK",
+        "OnStateMove",
+        "OnStateUpdate",
+        "OnStateMachineEnter",
+        "OnStateMachineExit",
+        "Awake",
+        "OnDestroy",
+        "OnDisable",
+        "OnEnable",
+        "OnValidate",
+        "Reset"
+      ],
+      "detection": "base includes UnityEngine.StateMachineBehaviour"
+    },
+    "Editor": {
+      "hostInvokedMethods": [
+        "Awake",
+        "OnEnable",
+        "OnDisable",
+        "OnDestroy",
+        "OnValidate",
+        "Reset",
+        "OnSceneGUI",
+        "HasFrameBounds",
+        "OnGetFrameBounds",
+        "OnInspectorGUI",
+        "CreateInspectorGUI",
+        "HasPreviewGUI",
+        "OnPreviewGUI",
+        "OnInteractivePreviewGUI",
+        "OnPreviewSettings",
+        "GetPreviewTitle",
+        "GetInfoString",
+        "RenderStaticPreview",
+        "RequiresConstantRepaint",
+        "UseDefaultMargins"
+      ],
+      "detection": "base includes UnityEditor.Editor"
+    },
+    "EditorWindow": {
+      "hostInvokedMethods": [
+        "Awake",
+        "CreateGUI",
+        "OnBecameInvisible",
+        "OnBecameVisible",
+        "OnDestroy",
+        "OnDisable",
+        "OnEnable",
+        "OnFocus",
+        "OnGUI",
+        "OnHierarchyChange",
+        "OnInspectorUpdate",
+        "OnLostFocus",
+        "OnProjectChange",
+        "OnSelectionChange",
+        "OnValidate",
+        "Reset",
+        "Update"
+      ],
+      "detection": "base includes UnityEditor.EditorWindow"
+    },
+    "PropertyDrawer": {
+      "hostInvokedMethods": ["CreatePropertyGUI", "GetPropertyHeight", "OnGUI"],
+      "detection": "base includes UnityEditor.PropertyDrawer"
+    },
+    "DecoratorDrawer": {
+      "hostInvokedMethods": ["CreatePropertyGUI", "GetHeight", "OnGUI"],
+      "detection": "base includes UnityEditor.DecoratorDrawer",
+      "note": "CreatePropertyGUI validated: listed on the DecoratorDrawer page in the local Unity 6.5 corpus."
+    },
+    "AssetPostprocessor": {
+      "hostInvokedMethods": [
+        "OnAssignMaterialModel",
+        "OnPostprocessAllAssets",
+        "OnPostprocessAnimation",
+        "OnPostprocessAssetbundleNameChanged",
+        "OnPostprocessAudio",
+        "OnPostprocessCubemap",
+        "OnPostprocessGameObjectWithAnimatedUserProperties",
+        "OnPostprocessGameObjectWithUserProperties",
+        "OnPostprocessMaterial",
+        "OnPostprocessMeshHierarchy",
+        "OnPostprocessModel",
+        "OnPostprocessPrefab",
+        "OnPostprocessSpeedTree",
+        "OnPostprocessSprites",
+        "OnPostprocessTexture",
+        "OnPostprocessTexture2DArray",
+        "OnPostprocessTexture3D",
+        "OnPreprocessAnimation",
+        "OnPreprocessAsset",
+        "OnPreprocessAudio",
+        "OnPreprocessCameraDescription",
+        "OnPreprocessLightDescription",
+        "OnPreprocessMaterialDescription",
+        "OnPreprocessModel",
+        "OnPreprocessSpeedTree",
+        "OnPreprocessTexture",
+        "GetPostprocessOrder",
+        "GetVersion"
+      ],
+      "detection": "base includes UnityEditor.AssetPostprocessor",
+      "note": "Closed docs-grounded set; no OnPostprocess<Type> convention matching in v1."
+    },
+    "AssetModificationProcessor": {
+      "hostInvokedMethods": [
+        "CanOpenForEdit",
+        "FileModeChanged",
+        "IsOpenForEdit",
+        "MakeEditable",
+        "OnWillCreateAsset",
+        "OnWillDeleteAsset",
+        "OnWillMoveAsset",
+        "OnWillSaveAssets"
+      ],
+      "detection": "base includes UnityEditor.AssetModificationProcessor",
+      "note": "Hooks are static editor callbacks; non-static declarations emit nothing."
+    }
+  },
+  "serializationAttributes": {
+    "note": "A field bearing one of these is set by the engine/inspector via serialization: keep it live and emit a references edge to its declared type when the type is a plain local/custom non-builtin name.",
+    "attributes": ["SerializeField", "SerializeReference"],
+    "referenceKind": "references (to the field's declared type)",
+    "resolverNotes": [
+      "[field: SerializeField] on an auto-property emits a liveness node referencing the PROPERTY symbol; never fabricate a backing-field node; emit nothing if the property symbol is unavailable.",
+      "Public fields of a [Serializable]/MonoBehaviour/ScriptableObject type are also serialized with no attribute, but detecting that requires Unity serializability rules and owner context; deferred.",
+      "Skip primitive, builtin, System.*, UnityEngine.*-qualified, and known external field types."
+    ]
+  },
+  "attributeEntryPoints": {
+    "note": "The decorated method or class is invoked by Unity/editor infrastructure, not by an in-code caller. Attribute matching accepts short and Attribute-suffixed forms with optional UnityEngine./UnityEditor. qualification; exact token only, no substring matches.",
+    "methodAttributes": [
+      { "attribute": "RuntimeInitializeOnLoadMethod", "scope": "static method", "invokedBy": "runtime bootstrap", "requiresStatic": true },
+      { "attribute": "InitializeOnLoadMethod", "scope": "static method", "invokedBy": "editor load", "requiresStatic": true },
+      { "attribute": "MenuItem", "scope": "static method", "invokedBy": "editor menu", "pathArg": "first string literal", "requiresStatic": true },
+      { "attribute": "ContextMenu", "scope": "instance method", "invokedBy": "inspector context menu", "pathArg": "first string literal", "requiresInstance": true },
+      { "attribute": "PostProcessBuild", "scope": "static method", "invokedBy": "build pipeline", "requiresStatic": true, "status": "corpus-verified", "corpusPage": "Callbacks.PostProcessBuildAttribute" },
+      { "attribute": "PostProcessScene", "scope": "static method", "invokedBy": "build pipeline", "requiresStatic": true, "status": "corpus-verified", "corpusPage": "Callbacks.PostProcessSceneAttribute" },
+      { "attribute": "DidReloadScripts", "scope": "static method", "invokedBy": "editor after recompile", "requiresStatic": true, "status": "corpus-verified", "corpusPage": "Callbacks.DidReloadScripts" },
+      { "attribute": "OnOpenAsset", "scope": "static method", "invokedBy": "editor asset open", "requiresStatic": true, "status": "corpus-verified", "corpusPage": "Callbacks.OnOpenAssetAttribute" },
+      { "attribute": "DrawGizmo", "scope": "static method", "invokedBy": "editor gizmo pass", "requiresStatic": true, "optionalTypeofReference": true, "note": "typeof(X) ref only when an explicit typeof argument names a local/custom type; no first-parameter type inference in v1." }
+    ],
+    "classAttributes": [
+      { "attribute": "InitializeOnLoad", "scope": "class", "invokedBy": "editor load runs the static constructor; keep the static ctor live" },
+      { "attribute": "CreateAssetMenu", "scope": "class (ScriptableObject)", "invokedBy": "editor Create menu", "pathArg": "menuName" },
+      { "attribute": "AddComponentMenu", "scope": "class (Component)", "pathArg": "first string literal" }
+    ],
+    "referenceKind": "entry-point liveness (no target); pathArg strings captured for provenance, not link resolution in v1"
+  },
+  "typeReferenceAttributes": {
+    "note": "The attribute's typeof(X) argument emits a references edge to X. Skip primitive, builtin, System.*, UnityEngine.*-qualified, and known external types. DrawGizmo is a method entry point with optional typeof reference and lives under attributeEntryPoints.",
+    "attributes": [
+      { "attribute": "RequireComponent", "arg": "typeof(X) (1–3)", "linksTo": "component type X" },
+      { "attribute": "CustomEditor", "arg": "typeof(X)", "linksTo": "the edited type X" },
+      { "attribute": "CustomPropertyDrawer", "arg": "typeof(X)", "linksTo": "the drawn type/attribute X" }
+    ],
+    "referenceKind": "references"
+  },
+  "stringInvokedCallSites": {
+    "note": "Preconditions for every call-site rule: (1) containing class provably host-based in the SAME file (direct or same-file-chained Unity host base); (2) single string LITERAL or bare-identifier nameof(M) — dotted nameof, concatenation, interpolation, variables, empty strings emit nothing; (3) exactly ONE same-class method matches — overload ambiguity emits NOTHING.",
+    "callSites": [
+      { "id": "send-message", "apiPattern": "Component.SendMessage(\"M\", ...) / BroadcastMessage / SendMessageUpwards", "argument": "first string literal or bare nameof(M)", "linksTo": "unique same-class sibling method only when receiver is implicit, this, or gameObject; any other receiver emits nothing; never project-wide name linking", "referenceKind": "references" },
+      { "id": "invoke", "apiPattern": "MonoBehaviour.Invoke(\"M\", t) / InvokeRepeating / CancelInvoke / IsInvoking", "argument": "first string literal or bare nameof(M)", "linksTo": "unique same-class sibling method; receiver must be implicit or this", "referenceKind": "references" },
+      { "id": "start-coroutine-string", "apiPattern": "StartCoroutine(\"M\") / StopCoroutine(\"M\")", "argument": "string literal or bare nameof(M)", "linksTo": "unique same-class coroutine method; receiver must be implicit or this", "referenceKind": "references", "note": "StartCoroutine(M()) is a normal static call; do not special-case it here." },
+      { "id": "context-menu-item", "apiPattern": "[ContextMenuItem(label, \"MethodName\")] on a field", "argument": "second string literal or bare nameof(M)", "linksTo": "unique same-class method on the declaring host-based class", "referenceKind": "references" }
+    ]
+  },
+  "catalogNotes": {
+    "documentationOnly": true,
+    "note": "Not read by unity.ts at runtime. Provenance, quarantine, deferrals, and false-positive guard record for behaviors hardcoded in the resolver.",
+    "baseWhitelist": {
+      "description": "The host-invoked-base whitelist. A UnityEngine/UnityEditor base not in this set does not make its methods host-invoked. Runtime equivalent: Object.keys(hostInvokedBases).",
+      "bases": [
+        "MonoBehaviour",
+        "ScriptableObject",
+        "StateMachineBehaviour",
+        "Editor",
+        "EditorWindow",
+        "PropertyDrawer",
+        "DecoratorDrawer",
+        "AssetPostprocessor",
+        "AssetModificationProcessor"
+      ],
+      "deferred": [
+        "ScriptableWizard",
+        "IPreprocessBuildWithReport / build interfaces",
+        "PlayerLoop system entries"
+      ]
+    },
+    "deferredPackageAttributes": {
+      "networking": {
+        "rows": ["ServerRpc", "ClientRpc", "Rpc", "Command", "TargetRpc", "SyncVar hook"],
+        "reason": "Package-specific and name-colliding across Netcode for GameObjects, Mirror, legacy UNet, and FishNet-style stacks.",
+        "futureGate": "Require package evidence such as using Unity.Netcode, using Mirror, FishNet usings, NetworkBehaviour base evidence, or manifest.json package entries; likely sibling-corpus resolvers."
+      },
+      "tests": {
+        "rows": ["Test", "UnityTest", "SetUp", "TearDown", "OneTimeSetUp", "OneTimeTearDown", "UnitySetUp", "UnityTearDown"],
+        "reason": "Package docs and collision-prone user attribute names; not core Unity 6.5 corpus rows.",
+        "futureGate": "Same-file using NUnit.Framework or using UnityEngine.TestTools gate; v1.1 candidate."
+      }
+    },
+    "quarantine": [
+      { "row": "ShowButton", "source": "EditorWindow", "reason": "Real-but-undocumented magic method; absent from the local corpus page." },
+      { "row": "OnHeaderGUI", "source": "Editor", "reason": "Absent from the local Editor corpus page." },
+      { "row": "OnBeforeTransformParentChanged", "source": "MonoBehaviour", "reason": "UGUI/UIBehaviour-internal candidate; not on the MonoBehaviour corpus page." },
+      { "row": "OnCanvasGroupChanged", "source": "MonoBehaviour", "reason": "UGUI/UIBehaviour-internal candidate; not on the MonoBehaviour corpus page." },
+      { "row": "OnDidApplyAnimationProperties", "source": "MonoBehaviour", "reason": "UGUI/UIBehaviour-internal candidate; not on the MonoBehaviour corpus page." },
+      { "row": "OnRectTransformDimensionsChange", "source": "MonoBehaviour", "reason": "UGUI/UIBehaviour-internal candidate; not on the MonoBehaviour corpus page." },
+      { "row": "DrawDefaultInspector / DrawHeader / DrawPreview / CreatePreview / Repaint / ShouldHideOpenButton", "source": "Editor utility methods", "reason": "User-callable utilities, not host-invoked entry points." },
+      { "row": "SaveChanges / DiscardChanges", "source": "Editor and EditorWindow", "reason": "User-callable utilities or marginal editor APIs, not v1 host callbacks." },
+      { "row": "OnBackingScaleFactorChanged", "source": "EditorWindow", "reason": "Deferred/quarantined until corpus-backed." }
+    ],
+    "falsePositiveGuards": [
+      { "id": "no-magic-method-without-host-base", "rule": "A method named Update/Start/OnEnable/etc. on a class whose base is not in the whitelist is a normal method; emit no host-invoked liveness. Bases are read only from class headers." },
+      { "id": "same-file-base-chain-only", "rule": "Same-file base chains may emit when proven in-file; cross-file base chains emit nothing under the per-file extraction ceiling." },
+      { "id": "static-modifier-enforcement", "rule": "Static-only attributes on non-static methods emit nothing; ContextMenu on static methods emits nothing." },
+      { "id": "unique-overload-string-invoke", "rule": "String-invoked method references require exactly one same-class method match; overload ambiguity emits nothing." },
+      { "id": "receiver-whitelist-send-message", "rule": "SendMessage/BroadcastMessage/SendMessageUpwards link only for implicit, this, or gameObject receivers and only to a unique same-class sibling; never project-wide name linking." },
+      { "id": "no-computed-string-invoke", "rule": "Variables, concatenation, interpolation, dotted nameof, and empty strings emit nothing." },
+      { "id": "no-typeof-builtin-reference", "rule": "typeof(X) and serialized field types skip primitive, builtin, System.*, UnityEngine.*-qualified, and known external types." },
+      { "id": "attribute-token-exact", "rule": "Match attributes by exact token with optional Attribute suffix and UnityEngine./UnityEditor. qualification; no substring matches such as MenuItemCustom." }
+    ],
+    "dynamicOrOutOfScope": [
+      { "id": "reflection-invoke", "apiPattern": "MethodInfo.Invoke / Type.GetType(\"...\") / Activator.CreateInstance", "resolverBehavior": "Emit nothing." },
+      { "id": "addcomponent-string", "apiPattern": "gameObject.AddComponent(\"TypeName\") (deprecated string form)", "resolverBehavior": "Emit nothing in v1 unless separately proven." },
+      { "id": "generic-getcomponent", "apiPattern": "GetComponent<T>() / AddComponent<T>()", "resolverBehavior": "Generic type args are ordinary static type references handled by C# extraction; do not double-emit." }
+    ],
+    "corpusVerification": {
+      "callbacksAttributes": {
+        "status": "complete",
+        "result": "kept",
+        "verifiedPages": [
+          "Callbacks.DidReloadScripts",
+          "Callbacks.PostProcessBuildAttribute",
+          "Callbacks.PostProcessSceneAttribute",
+          "Callbacks.OnOpenAssetAttribute"
+        ]
+      },
+      "monoBehaviourRectTransformPair": {
+        "status": "complete",
+        "kept": "OnChildRectTransformDimensionsChange",
+        "quarantined": "OnRectTransformDimensionsChange",
+        "result": "Local corpus has MonoBehaviour.OnChildRectTransformDimensionsChange page/xref and Messages row; no page, xref, or search hit for MonoBehaviour.OnRectTransformDimensionsChange."
+      }
+    },
+    "tier2Deferred": {
+      "description": "Unity-only asset wiring; not in v1. Requires parsing non-code YAML assets and/or the future Unity Slice Pack static scanner.",
+      "items": [
+        "UnityEvent inspector wiring: scene/.prefab/.asset YAML m_PersistentCalls to method.",
+        "Animation events: .anim asset functionName to method by name.",
+        "MonoBehaviour script usage: scene/prefab m_Script GUID to script asset.",
+        "Public-field implicit serialization.",
+        "DrawGizmo first-parameter type inference.",
+        "Dotted nameof(Class.M).",
+        "UIBehaviour/UGUI callback rows.",
+        "Editor callback-registration APIs such as EditorApplication.update += fn."
+      ]
+    },
+    "resolverCoverageNotes": [
+      "v1 Tier 1 is code-only: base+magic-method liveness, serialization-attribute field/property liveness plus type refs, attribute entry-point liveness, typeof type refs, and conservative string-invoked sibling-method links.",
+      "Cross-file base chains, computed strings, reflection, package-specific attributes, and all Tier 2 asset wiring emit nothing.",
+      "Pending-corpus-verification rows must be verified or quarantined before unity.ts consumes them."
+    ]
+  }
+}

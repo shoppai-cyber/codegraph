@@ -1,0 +1,956 @@
+{
+  "$schema": "https://codegraph.dev/schemas/blender-invocation-table.v0.json",
+  "name": "blender-runtime-invocation-table",
+  "version": "0.2.0",
+  "target": "Blender 4.2+ / 5.x; live probes run on Blender 5.1 lane 9878",
+  "consumed": {
+    "note": "Sections listed here are read by blender.ts at runtime; the exact fields consumed are named per section. Everything under catalogNotes is documentation-only provenance.",
+    "registerableBases": "key set (the registerable-base whitelist); <base>.hostInvokedMethods; <base>.idname.default",
+    "propertyCallbacks": "callbackKwargs, enumItemsKwarg, typeReferenceKwargs",
+    "operatorIdnameValidation": "pattern",
+    "manifest": "fileName, idField, typeField, skipExtractionForTypes, virtualPackagePrefix"
+  },
+  "sourcePriority": [
+    "01_CATALOG_LOCAL.md",
+    "02_PATTERNS_LOCAL.md",
+    "VALIDATION_LOG.md live probes",
+    "SYNTHESIS.md (bpy-invocation-prior-art lane, 3-provider reconciliation)",
+    "REVIEW_r1.md",
+    "codegraph repository source",
+    "official Blender documentation"
+  ],
+  "registerableBases": {
+    "Operator": {
+      "hostInvokedMethods": [
+        "poll",
+        "execute",
+        "check",
+        "invoke",
+        "modal",
+        "draw",
+        "cancel",
+        "description"
+      ],
+      "requiredMethods": [],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "category.name dotted lowercase",
+        "callPath": "bpy.ops.<category>.<name>()"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#C1",
+        "01_CATALOG_LOCAL.md#C2"
+      ],
+      "validated": [
+        "VAL-001",
+        "VAL-003.Operator"
+      ]
+    },
+    "Panel": {
+      "hostInvokedMethods": [
+        "poll",
+        "draw",
+        "draw_header",
+        "draw_header_preset"
+      ],
+      "requiredMethods": [
+        "draw"
+      ],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": false,
+        "default": "className",
+        "format": "CLASS_PT_name convention; explicit custom ID allowed"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#D1"
+      ],
+      "validated": [
+        "VAL-002",
+        "VAL-003.Panel"
+      ]
+    },
+    "Menu": {
+      "hostInvokedMethods": [
+        "poll",
+        "draw"
+      ],
+      "requiredMethods": [
+        "draw"
+      ],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": false,
+        "default": "className",
+        "format": "CLASS_MT_name convention; explicit custom ID allowed"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#D2"
+      ],
+      "validated": [
+        "VAL-003.Menu"
+      ]
+    },
+    "Header": {
+      "hostInvokedMethods": [
+        "draw"
+      ],
+      "requiredMethods": [
+        "draw"
+      ],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": false,
+        "default": "className",
+        "format": "CLASS_HT_name convention; explicit custom ID allowed"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#D3"
+      ],
+      "validated": [
+        "VAL-003.Header"
+      ]
+    },
+    "UIList": {
+      "hostInvokedMethods": [
+        "draw_item",
+        "draw_filter",
+        "filter_items"
+      ],
+      "requiredMethods": [],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": false,
+        "default": "className",
+        "format": "CLASS_UL_name convention; explicit custom ID allowed"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#D4"
+      ],
+      "validated": [
+        "VAL-003.UIList"
+      ]
+    },
+    "PropertyGroup": {
+      "hostInvokedMethods": [],
+      "requiredMethods": [],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": false,
+        "default": null,
+        "format": "data container; used through PointerProperty/CollectionProperty type="
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#E6"
+      ],
+      "validated": [
+        "VAL-003.PropertyGroup"
+      ]
+    },
+    "AddonPreferences": {
+      "hostInvokedMethods": [
+        "draw"
+      ],
+      "requiredMethods": [
+        "draw"
+      ],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": "__package__ or add-on module name",
+        "format": "must match add-on package/module name"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#M1"
+      ],
+      "validated": [
+        "VAL-003.AddonPreferences-mismatch"
+      ],
+      "validationNote": "Live bl_rna.functions did not expose draw as registered; kept from catalog because the API contract says Blender draws preferences."
+    },
+    "Gizmo": {
+      "hostInvokedMethods": [
+        "draw",
+        "draw_select",
+        "test_select",
+        "modal",
+        "setup",
+        "invoke",
+        "exit",
+        "select_refresh"
+      ],
+      "requiredMethods": [
+        "draw"
+      ],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": false,
+        "default": null,
+        "format": "custom gizmo id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#I2"
+      ],
+      "validated": [
+        "VAL-003.Gizmo"
+      ]
+    },
+    "GizmoGroup": {
+      "hostInvokedMethods": [
+        "poll",
+        "setup_keymap",
+        "setup",
+        "refresh",
+        "draw_prepare",
+        "invoke_prepare"
+      ],
+      "requiredMethods": [
+        "setup"
+      ],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "custom gizmo group id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#I1"
+      ],
+      "validated": [
+        "VAL-003.GizmoGroup"
+      ]
+    },
+    "NodeTree": {
+      "hostInvokedMethods": [
+        "poll",
+        "update",
+        "get_from_context",
+        "valid_socket_type"
+      ],
+      "requiredMethods": [],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "custom node tree id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#J1",
+        "01_CATALOG_LOCAL.md#J3"
+      ],
+      "validated": [
+        "VAL-003.NodeTree"
+      ]
+    },
+    "Node": {
+      "hostInvokedMethods": [
+        "poll",
+        "poll_instance",
+        "update",
+        "insert_link",
+        "init",
+        "copy",
+        "free",
+        "draw_buttons",
+        "draw_buttons_ext",
+        "draw_label"
+      ],
+      "requiredMethods": [],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "custom node id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#J1"
+      ],
+      "validated": [
+        "VAL-003.Node"
+      ]
+    },
+    "NodeSocket": {
+      "hostInvokedMethods": [
+        "draw",
+        "draw_color",
+        "draw_color_simple"
+      ],
+      "requiredMethods": [
+        "draw"
+      ],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "custom node socket id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#J2"
+      ],
+      "validated": [
+        "VAL-003.NodeSocket"
+      ]
+    },
+    "KeyingSetInfo": {
+      "hostInvokedMethods": [
+        "poll",
+        "iterator",
+        "generate"
+      ],
+      "requiredMethods": [
+        "poll",
+        "iterator",
+        "generate"
+      ],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "custom keying-set id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#N5"
+      ],
+      "validated": [
+        "VAL-003.KeyingSetInfo"
+      ]
+    },
+    "RenderEngine": {
+      "hostInvokedMethods": [
+        "update",
+        "render",
+        "render_frame_finish",
+        "draw",
+        "bake",
+        "view_update",
+        "view_draw",
+        "update_script_node",
+        "update_render_passes",
+        "update_custom_camera"
+      ],
+      "requiredMethods": [],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "render engine id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#L1"
+      ],
+      "validated": [
+        "VAL-003.RenderEngine"
+      ]
+    },
+    "AssetShelf": {
+      "hostInvokedMethods": [
+        "poll",
+        "asset_poll",
+        "get_active_asset",
+        "draw_context_menu"
+      ],
+      "requiredMethods": [],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "asset shelf id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#N5"
+      ],
+      "validated": [
+        "VAL-003.AssetShelf"
+      ]
+    },
+    "FileHandler": {
+      "hostInvokedMethods": [
+        "poll_drop"
+      ],
+      "requiredMethods": [],
+      "idname": {
+        "attribute": "bl_idname",
+        "required": true,
+        "default": null,
+        "format": "file handler id"
+      },
+      "provenance": [
+        "01_CATALOG_LOCAL.md#N5"
+      ],
+      "validated": [
+        "VAL-003.FileHandler"
+      ]
+    }
+  },
+  "propertyCallbacks": {
+    "description": "Keyword arguments of bpy.props.*Property(...) calls that register runtime callbacks (function_ref) or type linkage (references). Consumed by both the property-injection path (bpy.types.T.attr = ...) and the generic in-class annotation path.",
+    "callbackKwargs": [
+      "update",
+      "get",
+      "set",
+      "get_transform",
+      "set_transform",
+      "search",
+      "poll",
+      "items"
+    ],
+    "enumItemsKwarg": "items",
+    "typeReferenceKwargs": [
+      "type"
+    ],
+    "referenceKind": "function_ref for callbackKwargs; references for typeReferenceKwargs",
+    "resolverNotes": [
+      "items= is a callback only when the value is a callable name; tuple/list/dict literals are static enum data (falsePositiveGuards.no-static-enum-items-callback).",
+      "type= emits a references edge only for a plain capitalized class name that is not bpy.*-prefixed; loop variables and builtin RNA types are skipped (false-positive-safe)."
+    ],
+    "provenance": [
+      "01_CATALOG_LOCAL.md#E1",
+      "01_CATALOG_LOCAL.md#E2",
+      "01_CATALOG_LOCAL.md#E3",
+      "01_CATALOG_LOCAL.md#E4",
+      "01_CATALOG_LOCAL.md#E5",
+      "01_CATALOG_LOCAL.md#E6",
+      "02_PATTERNS_LOCAL.md#G",
+      "02_PATTERNS_LOCAL.md#ranking-4"
+    ],
+    "validated": [
+      "SYNTHESIS.md#timing (GPT-DR primary read: bpy.props update/get/set/items/poll/search kwargs are stored as real RNA callback hooks)"
+    ]
+  },
+  "operatorIdnameValidation": {
+    "pattern": "^[a-z0-9_]+\\.[a-z0-9_]+$",
+    "rule": "Operator idnames are lowercase [a-z0-9_.] with exactly one dot (category.name). A string failing validation at an operator call site (bpy.ops path, UILayout.operator*, keymap_items.new, target_set_operator, Macro.define) emits nothing: no idname reference and no node. Non-operator idnames (Panel/Menu/Header/UIList bl_idname, bl_parent_id) follow the class-name convention and are NOT subject to this charset rule.",
+    "provenance": [
+      "SYNTHESIS.md#2-X2",
+      "REVIEW_r1.md gap (b)"
+    ],
+    "validated": [
+      "SYNTHESIS.md 3/3 providers; Blender WM core WM_operator_py_idname charset rules (canonical wm_operators.cc)"
+    ]
+  },
+  "manifest": {
+    "fileName": "blender_manifest.toml",
+    "idField": "id",
+    "typeField": "type",
+    "skipExtractionForTypes": [
+      "theme"
+    ],
+    "virtualPackagePrefix": "bl_ext",
+    "rule": "The manifest id defines the extension's virtual import package root bl_ext.{repository_module}.{id}; the repository module segment is host-configured and statically unknowable, so resolution matches the id segment against the manifest and maps the remaining dotted path against the manifest's directory. The manifest carries metadata and import-root identity only — it contributes NO callback or entry-point linkage. type == \"theme\" disables Python invocation extraction for the project.",
+    "provenance": [
+      "SYNTHESIS.md#RQ4",
+      "SYNTHESIS.md#2-X1",
+      "SYNTHESIS.md verdict rule 1 and rule 2"
+    ],
+    "validated": [
+      "SYNTHESIS.md 3/3 providers on bl_ext.{repo}.{id}; Gemini import-resolution consequence adjudicated as additive"
+    ]
+  },
+  "catalogNotes": {
+    "documentationOnly": true,
+    "note": "Nothing in this section is read by blender.ts at runtime. Extraction regexes and behaviors are hardcoded in the resolver with the rule ids below cited in comments; this section is the provenance and validation record for them.",
+    "registerableBaseWhitelist": {
+      "description": "Classes accepted by bpy.utils.register_class according to the local catalog; non-whitelisted bpy.types.* mentions must not imply registration. Runtime equivalent: Object.keys(registerableBases).",
+      "bases": [
+        "Operator",
+        "Panel",
+        "Menu",
+        "Header",
+        "UIList",
+        "PropertyGroup",
+        "AddonPreferences",
+        "Gizmo",
+        "GizmoGroup",
+        "NodeTree",
+        "Node",
+        "NodeSocket",
+        "KeyingSetInfo",
+        "RenderEngine",
+        "AssetShelf",
+        "FileHandler"
+      ],
+      "provenance": [
+        "01_CATALOG_LOCAL.md#B1"
+      ],
+      "validated": [
+        "VAL-004"
+      ]
+    },
+    "registrationSignals": [
+      {
+        "id": "module-register",
+        "kind": "moduleEntry",
+        "anchors": [
+          "def register():",
+          "def unregister():"
+        ],
+        "emits": [
+          "entry-node -> register function",
+          "entry-node -> unregister function"
+        ],
+        "provenance": [
+          "01_CATALOG_LOCAL.md#A1"
+        ],
+        "validated": [
+          "VAL-000"
+        ]
+      },
+      {
+        "id": "register-class",
+        "kind": "classRegistration",
+        "anchors": [
+          "bpy.utils.register_class(Class)",
+          "register_class(Class) via from bpy.utils import register_class [as alias]",
+          "for cls in classes: register_class(cls)"
+        ],
+        "resolverNotes": [
+          "Resolve list/tuple membership (balanced-bracket parse)",
+          "Resolve list.append(Class)",
+          "Resolve simple aliases to registerable bases (assignment AND from-import forms, including as-renames)",
+          "A registration argument not defined in the same file emits a registration-site node with a plain class-name reference; the pipeline resolves it cross-file (REVIEW_r1 gap (e), partial — see resolverCoverageNotes)"
+        ],
+        "provenance": [
+          "01_CATALOG_LOCAL.md#B1",
+          "02_PATTERNS_LOCAL.md#ranking-1",
+          "02_PATTERNS_LOCAL.md#ranking-2",
+          "SYNTHESIS.md#RQ2 registration-indirection ranking"
+        ],
+        "validated": [
+          "VAL-003",
+          "VAL-004"
+        ]
+      },
+      {
+        "id": "register-classes-factory",
+        "kind": "classRegistration",
+        "anchors": [
+          "bpy.utils.register_classes_factory((ClsA, ClsB, ...))",
+          "bpy.utils.register_classes_factory(classes)"
+        ],
+        "provenance": [
+          "01_CATALOG_LOCAL.md#B2"
+        ],
+        "validated": []
+      },
+      {
+        "id": "register-tool",
+        "kind": "toolRegistration",
+        "anchors": [
+          "bpy.utils.register_tool(ToolCls, ...)"
+        ],
+        "resolverNotes": [
+          "NO resolver behavior in r2 (documentation-only): WorkSpaceTool is not a register_class surface and was out of the r1 emit set; kept as a catalog record."
+        ],
+        "provenance": [
+          "01_CATALOG_LOCAL.md#N1"
+        ],
+        "validated": []
+      }
+    ],
+    "idnameRules": [
+      {
+        "id": "operator-explicit-dotted-idname",
+        "scope": [
+          "Operator"
+        ],
+        "attribute": "bl_idname",
+        "required": true,
+        "derivation": "No automatic derivation is assumed; the literal dotted idname is authoritative. Class names normally follow CATEGORY_OT_name but that is convention-only and never a resolution source (SYNTHESIS rule 3; REVIEW_r1 bug 9 — the r1 inference fallback is removed in r2).",
+        "examples": [
+          "bl_idname = \"wm.hello_world\"",
+          "bpy.ops.wm.hello_world()"
+        ],
+        "provenance": [
+          "01_CATALOG_LOCAL.md#C2",
+          "SYNTHESIS.md#2-X2"
+        ],
+        "validated": [
+          "VAL-001"
+        ]
+      },
+      {
+        "id": "ui-class-default-idname",
+        "scope": [
+          "Panel",
+          "Menu",
+          "Header",
+          "UIList"
+        ],
+        "attribute": "bl_idname",
+        "required": false,
+        "derivation": "If absent, the class name is the idname. Runtime equivalent: registerableBases.<base>.idname.default === 'className'.",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#D1",
+          "01_CATALOG_LOCAL.md#D2",
+          "01_CATALOG_LOCAL.md#D3",
+          "01_CATALOG_LOCAL.md#D4"
+        ],
+        "validated": [
+          "VAL-002"
+        ]
+      },
+      {
+        "id": "addon-preferences-package-idname",
+        "scope": [
+          "AddonPreferences"
+        ],
+        "attribute": "bl_idname",
+        "required": true,
+        "derivation": "Package/module name; for extensions use __package__.",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#M1",
+          "01_CATALOG_LOCAL.md#extensions-3.2"
+        ],
+        "validated": [
+          "VAL-003.AddonPreferences-mismatch"
+        ]
+      },
+      {
+        "id": "computed-idname-no-guess",
+        "scope": [
+          "all-registerable-bases"
+        ],
+        "attribute": "bl_idname",
+        "required": "depends-on-base",
+        "derivation": "Computed expressions, f-strings, concatenation, or __package__ expressions are not guessed. r2 emits NOTHING for them (no idname mapping, no node) — informational diagnostic nodes were removed per the r2 ruling that no sibling resolver pollutes listings with non-invocation nodes.",
+        "provenance": [
+          "02_PATTERNS_LOCAL.md#ranking-3",
+          "01_CATALOG_LOCAL.md#C2",
+          "REVIEW_r1.md ruling 2"
+        ],
+        "validated": []
+      }
+    ],
+    "stringLinkingCallSites": [
+      {
+        "id": "bpy-ops-operator-call",
+        "apiPattern": "bpy.ops.<category>.<name>(...)",
+        "linksTo": "Operator.bl_idname",
+        "argument": "attribute chain",
+        "referenceKind": "references",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#C2",
+          "02_PATTERNS_LOCAL.md#E"
+        ],
+        "validated": [
+          "VAL-001"
+        ]
+      },
+      {
+        "id": "ui-layout-operator",
+        "apiPattern": "UILayout.operator(<operator_bl_idname>, ...) / operator_enum(...) / operator_menu_enum(...)",
+        "linksTo": "Operator.bl_idname",
+        "argument": "string literal or Class.bl_idname",
+        "referenceKind": "references",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#D5",
+          "02_PATTERNS_LOCAL.md#ranking-3"
+        ],
+        "validated": [
+          "VAL-001"
+        ]
+      },
+      {
+        "id": "ui-layout-menu",
+        "apiPattern": "UILayout.menu(<menu_bl_idname>, ...)",
+        "linksTo": "Menu.bl_idname",
+        "argument": "string literal",
+        "referenceKind": "references",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#D2",
+          "01_CATALOG_LOCAL.md#D5"
+        ],
+        "validated": [
+          "VAL-002"
+        ]
+      },
+      {
+        "id": "ui-layout-template-list",
+        "apiPattern": "UILayout.template_list(<uilist_bl_idname>, ...)",
+        "linksTo": "UIList.bl_idname",
+        "argument": "string literal",
+        "referenceKind": "references",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#D4",
+          "01_CATALOG_LOCAL.md#D5"
+        ],
+        "validated": [
+          "VAL-002"
+        ]
+      },
+      {
+        "id": "keymap-items-new",
+        "apiPattern": "keymap.keymap_items.new(idname=<operator_bl_idname>, ...)",
+        "linksTo": "Operator.bl_idname",
+        "argument": "idname string literal or first positional argument (Class.bl_idname accepted, REVIEW_r1 bug 15)",
+        "referenceKind": "references",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#H1"
+        ],
+        "validated": [
+          "VAL-001",
+          "SYNTHESIS.md#timing (keymap match runs WM_operator_poll_context — a keymap idname is a safe reference edge)"
+        ]
+      },
+      {
+        "id": "gizmo-target-set-operator",
+        "apiPattern": "gizmo.target_set_operator(<operator_bl_idname>)",
+        "linksTo": "Operator.bl_idname",
+        "argument": "string literal",
+        "referenceKind": "references",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#I2"
+        ],
+        "validated": [
+          "VAL-001"
+        ]
+      },
+      {
+        "id": "macro-define",
+        "apiPattern": "MacroClass.define(<operator_bl_idname>)",
+        "linksTo": "Operator.bl_idname",
+        "argument": "string literal; may be forward reference",
+        "referenceKind": "references",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#K1"
+        ],
+        "validated": [
+          "VAL-001"
+        ]
+      },
+      {
+        "id": "panel-parent-id",
+        "apiPattern": "Panel.bl_parent_id = <panel_bl_idname>",
+        "linksTo": "Panel.bl_idname",
+        "argument": "class attribute string (class-name-form idname; operator charset validation does NOT apply)",
+        "referenceKind": "references",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#D1"
+        ],
+        "validated": [
+          "VAL-002"
+        ]
+      }
+    ],
+    "callbackRegistrationCalls": [
+      {
+        "id": "handlers-append",
+        "apiPattern": "bpy.app.handlers.<event>.append(fn)",
+        "callbackArguments": [
+          "first positional"
+        ],
+        "referenceKind": "function_ref",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#F1"
+        ],
+        "validated": []
+      },
+      {
+        "id": "timers-register",
+        "apiPattern": "bpy.app.timers.register(fn, ...)",
+        "callbackArguments": [
+          "first positional"
+        ],
+        "referenceKind": "function_ref",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#F2",
+          "02_PATTERNS_LOCAL.md#ranking-5"
+        ],
+        "validated": []
+      },
+      {
+        "id": "msgbus-subscribe-rna",
+        "apiPattern": "bpy.msgbus.subscribe_rna(..., notify=fn, ...)",
+        "callbackArguments": [
+          "notify"
+        ],
+        "referenceKind": "function_ref",
+        "resolverNotes": [
+          "r2 bounds the notify= search to the subscribe_rna call's own balanced closing paren (REVIEW_r1 bug 13)."
+        ],
+        "provenance": [
+          "01_CATALOG_LOCAL.md#F3"
+        ],
+        "validated": []
+      },
+      {
+        "id": "space-draw-handler-add",
+        "apiPattern": "bpy.types.Space*.draw_handler_add(fn, args, region_type, draw_type)",
+        "callbackArguments": [
+          "first positional"
+        ],
+        "referenceKind": "function_ref",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#G1"
+        ],
+        "validated": []
+      },
+      {
+        "id": "menu-panel-header-append-prepend",
+        "apiPattern": "bpy.types.<MenuOrPanelOrHeaderOrUIList>.append(fn) / prepend(fn)",
+        "callbackArguments": [
+          "first positional"
+        ],
+        "referenceKind": "function_ref",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#D2",
+          "01_CATALOG_LOCAL.md#D3",
+          "01_CATALOG_LOCAL.md#D4",
+          "02_PATTERNS_LOCAL.md#ranking-5"
+        ],
+        "validated": []
+      },
+      {
+        "id": "manual-map",
+        "apiPattern": "bpy.utils.register_manual_map(fn)",
+        "callbackArguments": [
+          "first positional"
+        ],
+        "referenceKind": "function_ref",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#N3"
+        ],
+        "validated": []
+      },
+      {
+        "id": "cli-command",
+        "apiPattern": "bpy.utils.register_cli_command(id, execute)",
+        "callbackArguments": [
+          "execute"
+        ],
+        "referenceKind": "function_ref",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#N2"
+        ],
+        "validated": []
+      },
+      {
+        "id": "translations-register",
+        "apiPattern": "bpy.app.translations.register(__name__, translations_dict)",
+        "callbackArguments": [],
+        "referenceKind": "references",
+        "resolverNotes": [
+          "NO resolver behavior in r2 (documentation-only): carries no callable linkage; kept as a catalog record."
+        ],
+        "provenance": [
+          "01_CATALOG_LOCAL.md#M2"
+        ],
+        "validated": []
+      }
+    ],
+    "dynamicOrOutOfScopeSignals": [
+      {
+        "id": "dynamic-annotations-property-injection",
+        "apiPattern": "SomeClass.__annotations__[key] = bpy.props.*Property(...)",
+        "resolverBehavior": "Emit nothing. Computed keys are never fabricated; literal keys are ALSO skipped (false-positive-safe side of the r1 table/code conflict: the owning RNA type of a dict-form annotation injection is not statically attributable, and r2 emits no informational nodes).",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#E5",
+          "02_PATTERNS_LOCAL.md#ranking-7",
+          "REVIEW_r1.md ruling 4"
+        ],
+        "validated": []
+      },
+      {
+        "id": "computed-import-module",
+        "apiPattern": "importlib.import_module(f'...') or import_module(variable)",
+        "resolverBehavior": "Emit nothing (r2: no informational diagnostic nodes; do not fabricate imports).",
+        "provenance": [
+          "02_PATTERNS_LOCAL.md#ranking-8"
+        ],
+        "validated": []
+      },
+      {
+        "id": "dynamic-class-type-call",
+        "apiPattern": "type('Name', (bpy.types.Operator,), {...})",
+        "resolverBehavior": "Emit nothing. Known Blender mechanism (rare, actively discouraged per SYNTHESIS RQ2); statically out of scope.",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#B4",
+          "SYNTHESIS.md#RQ2"
+        ],
+        "validated": []
+      }
+    ],
+    "falsePositiveGuards": [
+      {
+        "id": "no-isinstance-bpy-types-registration",
+        "pattern": "isinstance(x, bpy.types.NodeTree) / isinstance(x, bpy.types.Node)",
+        "rule": "Do not treat bpy.types.* mentions outside class bases and register_class calls as registered classes. Enforced structurally: bases are only read from class-statement headers.",
+        "provenance": [
+          "02_PATTERNS_LOCAL.md#false-positive-trap"
+        ],
+        "validated": [
+          "VAL-004"
+        ]
+      },
+      {
+        "id": "no-pep585-subscript-registration",
+        "pattern": "SpecificExporter[bpy.types.NodeTree]",
+        "rule": "Do not inspect subscript type arguments as class bases. Enforced structurally: bracketed base expressions are skipped.",
+        "provenance": [
+          "02_PATTERNS_LOCAL.md#false-positive-trap"
+        ],
+        "validated": [
+          "VAL-004"
+        ]
+      },
+      {
+        "id": "no-static-enum-items-callback",
+        "pattern": "EnumProperty(items=(...)) or EnumProperty(items=[...])",
+        "rule": "Static tuple/list enum items are data, not callable callbacks.",
+        "provenance": [
+          "02_PATTERNS_LOCAL.md#G",
+          "02_PATTERNS_LOCAL.md#ranking-6"
+        ],
+        "validated": []
+      },
+      {
+        "id": "no-computed-annotations-fabrication",
+        "pattern": "__annotations__[<any key>] = bpy.props.*Property(...)",
+        "rule": "Emit no property nodes and no references for __annotations__ dict-form injection, whether the key is computed or literal (reconciled in r2 to the false-positive-safe side; the r1 table implied literal keys should emit).",
+        "provenance": [
+          "02_PATTERNS_LOCAL.md#ranking-7",
+          "REVIEW_r1.md ruling 4"
+        ],
+        "validated": []
+      },
+      {
+        "id": "no-loop-variable-registration-target",
+        "pattern": "for cls in classes: register_class(cls)",
+        "rule": "A register_class argument that is a for-loop variable is never itself a class; membership comes from the loop's list. Prevents fabricated cross-file registration-site nodes for loop variables.",
+        "provenance": [
+          "REVIEW_r1.md gap (e) implementation note"
+        ],
+        "validated": []
+      }
+    ],
+    "legacySignals": [
+      {
+        "id": "legacy-bl-info",
+        "apiPattern": "bl_info = {...}",
+        "resolverBehavior": "Detection signal only (add-on identity for detect()/extract() gating). r2 emits NO node for it — it is metadata, not an invocation edge, and informational nodes were removed.",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#extensions-3.1",
+          "02_PATTERNS_LOCAL.md#I"
+        ],
+        "validated": []
+      },
+      {
+        "id": "removed-register-module",
+        "apiPattern": "bpy.utils.register_module(__name__)",
+        "resolverBehavior": "Legacy only (removed in Blender 2.8x); NO resolver behavior (emit nothing).",
+        "provenance": [
+          "01_CATALOG_LOCAL.md#B3"
+        ],
+        "validated": []
+      }
+    ],
+    "resolverCoverageNotes": [
+      "The resolver handles 02_PATTERNS_LOCAL.md ranked patterns 1-6 plus SYNTHESIS registration-indirection forms: from-import bases (with as-renames), assignment aliases, bare/imported register_class, list/tuple/append/factory registration.",
+      "Cross-file registration: a registration site names an imported class; the site emits a node + plain class-name reference resolved cross-file by the pipeline. LIMITATION: host-callback method nodes for a class registered from a DIFFERENT file are not emitted — framework extract() runs per-file in isolated workers and postExtract() can only UPDATE existing nodes (db updateNode is UPDATE-by-id), so no channel exists to create the per-method nodes after the fact.",
+      "Dynamic idnames, dynamic __annotations__ keys, computed import_module targets, and type()-generated classes emit nothing (never guessed, never diagnosed as nodes).",
+      "Live validation added callback methods not fully enumerated in the local catalog for RenderEngine, AssetShelf, FileHandler, KeyingSetInfo, NodeTree, NodeSocket, Gizmo, and GizmoGroup."
+    ]
+  }
+}
