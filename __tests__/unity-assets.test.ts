@@ -35,6 +35,7 @@ const GUID = {
   enemyAI: '58067f1d0bb95044f9f3d19e820ac6f1',
   enemyPrefab: 'e6664d4658ea11f4db518b9ec367f031',
   weaponPrefab: 'a1d1502710d762e43a0c9d2908a0e5e4',
+  coinPrefab: 'b2c3d4e5f60718293a4b5c6d7e8f9012',
   // Part F UnityEvent fixture (tester-01 CoinDash): PlayerHealth.onDeath and
   // Button.m_OnClick both persistently invoke GameManager.ResetScore.
   playerHealth: 'fd5424596a3326042a0ca777d9f1b77f',
@@ -1211,6 +1212,29 @@ PrefabInstance:
     expect(updates[0]!.qualifiedName).toBe(`${SCENE}#PrefabInstance`); // stable idempotency marker
     // The overrides metadata is left untouched.
     expect(updates[0]!.docstring).toContain('BonusCoin');
+  });
+
+  it('names the instance from the source-prefab stem (Coin), never from a child m_Name override, and preserves the nameOverrides metadata', () => {
+    // The instanceNode helper carries a child override `nameOverrides=555:BonusCoin`
+    // in its docstring. The rename must take the source-prefab file STEM (`Coin`),
+    // never the child override value (`BonusCoin`) — the finding-2 child-rename
+    // hazard the postExtract design avoids — and must leave the metadata intact.
+    const inst = instanceNode(1);
+    const ctx = makeContext({
+      getNodesByKind: (k) => (k === 'component' ? [inst] : []),
+      getAllFiles: () => ['Assets/prefabs/Coin.prefab'],
+      readFile: (p) => {
+        if (p === SCENE) return sceneWithInstance(GUID.coinPrefab);
+        if (p === 'Assets/prefabs/Coin.prefab.meta') return `fileFormatVersion: 2\nguid: ${GUID.coinPrefab}`;
+        return null;
+      },
+    });
+
+    const updates = unityAssetResolver.postExtract!(ctx);
+    expect(updates.length).toBe(1);
+    expect(updates[0]!.name).toBe('Coin'); // source-prefab file stem
+    expect(updates[0]!.name).not.toBe('BonusCoin'); // never the child override — child-rename hazard avoided
+    expect(updates[0]!.docstring).toContain('nameOverrides=555:BonusCoin'); // metadata preserved verbatim
   });
 
   it('leaves an instance conservatively named when its source guid is unindexed (package prefab)', () => {
