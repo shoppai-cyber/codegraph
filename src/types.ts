@@ -91,6 +91,7 @@ export const LANGUAGES = [
   'luau',
   'objc',
   'r',
+  'solidity',
   'yaml',
   'twig',
   'xml',
@@ -102,6 +103,10 @@ export const LANGUAGES = [
   // grammar — parsed by the standalone UnityAssetExtractor into GameObject/
   // prefab nodes + asset-wiring edges.
   'unity_yaml',
+  'cobol',
+  'vbnet',
+  'erlang',
+  'terraform',
   'unknown',
 ] as const;
 

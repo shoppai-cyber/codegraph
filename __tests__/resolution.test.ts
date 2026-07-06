@@ -83,6 +83,96 @@ describe('Resolution Module', () => {
       expect(result?.resolvedBy).toBe('exact-match');
     });
 
+    it('should resolve Erlang -behaviour refs only to module namespaces', () => {
+      // On emqx, `-behaviour(supervisor)` (OTP behaviour, not in the repo)
+      // fell through to bare-name matching and resolved to a
+      // `-define(supervisor, ...)` macro constant in an unrelated app.
+      const macroConstant: Node = {
+        id: 'constant:apps/bridge/src/impl.erl:supervisor:61',
+        kind: 'constant',
+        name: 'supervisor',
+        qualifiedName: 'impl::supervisor',
+        filePath: 'apps/bridge/src/impl.erl',
+        language: 'erlang',
+        startLine: 61,
+        endLine: 61,
+        startColumn: 0,
+        endColumn: 0,
+        updatedAt: Date.now(),
+      };
+      const behaviourModule: Node = {
+        id: 'namespace:src/my_behaviour.erl:my_behaviour:1',
+        kind: 'namespace',
+        name: 'my_behaviour',
+        qualifiedName: 'my_behaviour',
+        filePath: 'src/my_behaviour.erl',
+        language: 'erlang',
+        startLine: 1,
+        endLine: 1,
+        startColumn: 0,
+        endColumn: 0,
+        updatedAt: Date.now(),
+      };
+      const nodes = [macroConstant, behaviourModule];
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: (name) => nodes.filter((n) => n.name === name),
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        fileExists: () => false,
+        readFile: () => null,
+        getProjectRoot: () => '/test',
+        getAllFiles: () => [],
+        getNodesByLowerName: () => [],
+        getImportMappings: () => [],
+      };
+      const mkRef = (name: string) => ({
+        fromNodeId: 'namespace:src/worker.erl:worker:1',
+        referenceName: name,
+        referenceKind: 'implements' as const,
+        line: 2,
+        column: 0,
+        filePath: 'src/worker.erl',
+        language: 'erlang' as const,
+      });
+
+      // Out-of-repo behaviour whose name collides with a macro constant:
+      // stays unresolved instead of linking the constant.
+      expect(matchReference(mkRef('supervisor'), context)).toBeNull();
+      // In-repo behaviour module resolves to its namespace.
+      const resolved = matchReference(mkRef('my_behaviour'), context);
+      expect(resolved?.targetNodeId).toBe(behaviourModule.id);
+
+      // The same module-only rule covers refs emitted by .app/.app.src
+      // resource files: on emqx, the `ssl` OTP app dependency resolved to a
+      // test helper FUNCTION named ssl. A colliding non-module name stays
+      // unresolved; a real umbrella-sibling module resolves.
+      nodes.push({
+        id: 'function:test/ldap_SUITE.erl:ssl:12',
+        kind: 'function',
+        name: 'ssl',
+        qualifiedName: 'ldap_SUITE::ssl',
+        filePath: 'test/ldap_SUITE.erl',
+        language: 'erlang',
+        startLine: 12,
+        endLine: 14,
+        startColumn: 0,
+        endColumn: 0,
+        updatedAt: Date.now(),
+      });
+      const appRef = (name: string) => ({
+        fromNodeId: 'file:src/myapp.app.src',
+        referenceName: name,
+        referenceKind: 'imports' as const,
+        line: 6,
+        column: 0,
+        filePath: 'src/myapp.app.src',
+        language: 'erlang' as const,
+      });
+      expect(matchReference(appRef('ssl'), context)).toBeNull();
+      expect(matchReference(appRef('my_behaviour'), context)?.targetNodeId).toBe(behaviourModule.id);
+    });
+
     it('should prefer same-module candidates over cross-module matches', () => {
       // Simulates a Python monorepo where multiple apps define navigate()
       const candidateA: Node = {

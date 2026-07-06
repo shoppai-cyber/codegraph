@@ -1753,6 +1753,32 @@ export function matchReference(
     return matchFunctionRef(ref, context);
   }
 
+  // Erlang `-behaviour(m)` refs target a MODULE. Letting them fall through to
+  // bare-name matching grabs any same-named symbol — on emqx,
+  // `-behaviour(supervisor)` resolved to a `-define(supervisor, …)` macro
+  // constant in an unrelated app. Resolve only to the behaviour module's
+  // namespace; an out-of-repo behaviour (OTP's gen_server/supervisor) stays
+  // unresolved rather than guessed. The same module-only rule applies to every
+  // ref an `.app`/`.app.src` resource file emits — its `{mod, …}` callback and
+  // `{applications, …}` dependency names can only mean modules, and on emqx
+  // the `ssl` OTP app otherwise resolved to a test helper FUNCTION named ssl.
+  if (
+    ref.language === 'erlang' &&
+    (ref.referenceKind === 'implements' || /\.app(?:\.src)?$/i.test(ref.filePath))
+  ) {
+    const modules = context
+      .getNodesByName(ref.referenceName)
+      .filter((n) => n.language === 'erlang' && n.kind === 'namespace');
+    const chosen = preferCallSiteFile(modules, ref.filePath)[0];
+    if (!chosen) return null;
+    return {
+      original: ref,
+      targetNodeId: chosen.id,
+      confidence: 0.9,
+      resolvedBy: 'exact-match',
+    };
+  }
+
   // Try strategies in order of confidence
   let result: ResolvedRef | null;
 
