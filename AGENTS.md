@@ -6,6 +6,10 @@
 > itself works — read it, don't duplicate it here. Claude/Fable read this via the `CLAUDE.md` pointer;
 > Codex reads it directly.
 
+> **Updating this fork from upstream:** follow **`FORK-MAINTENANCE.md`** (repo root). Always check
+> the divergence first; merge (never rebase) `main`; known conflict hotspots + validation steps are
+> in that runbook. Never push/PR/tag upstream.
+
 ## Who works here
 - **Codex (GPT-5.5 xhigh) — primary builder** on the active workstream.
 - **Fable — secondary** (design pressure-test / review), pulled in as needed.
