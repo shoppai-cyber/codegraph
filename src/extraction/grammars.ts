@@ -523,14 +523,11 @@ export function getLanguageDisplayName(language: Language): string {
     cfml: 'CFML',
     cfscript: 'CFScript',
     cfquery: 'CFQuery (SQL)',
-<<<<<<< HEAD
     unity_yaml: 'Unity YAML',
-=======
     cobol: 'COBOL',
     vbnet: 'Visual Basic .NET',
     erlang: 'Erlang',
     terraform: 'Terraform',
->>>>>>> upstream/main
     unknown: 'Unknown',
   };
   return names[language] || language;
