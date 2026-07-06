@@ -43,14 +43,25 @@ case), expect conflicts only in the registry hotspots below.
 
 ### 2. Preconditions
 
-- On `main`, clean working tree (`git status`). Stash or commit residue first.
+- Clean working tree (`git status`). Stash or commit residue first.
 - No in-flight fork branch is mid-review against old main (a merge commit on
   main is fine for them, but know what's in flight).
 
-### 3. Merge
+### 3. Merge — on a sync branch, never directly on main
+
+Kyle's machines run a branch-safety hook that **blocks `git commit` on
+`main`** whenever the repo has open PRs (and concluding a conflicted merge IS
+a `git commit`). Don't fight it and don't route around it — do the whole sync
+on a branch, then fast-forward main (a ff-merge invokes no commit):
 
 ```bash
+git checkout -b sync/upstream-<YYYY-MM-DD>
 git merge upstream/main -m "merge: sync upstream/main (<latest upstream sha, date>)"
+# ...resolve conflicts, validate (steps 4-5), then:
+git checkout main
+git merge sync/upstream-<YYYY-MM-DD>     # fast-forward
+git push origin main
+git branch -d sync/upstream-<YYYY-MM-DD>
 ```
 
 ### 4. Resolve conflicts — known hotspots and how each resolves
@@ -71,8 +82,26 @@ Both sides register things in the same files; resolution is almost always
 Anything conflicting outside this table: stop and read both sides properly —
 it means one of us changed shared logic, not just a registry.
 
+**A file can contain MULTIPLE conflict hunks.** Resolving the first hunk a
+search showed you is not done — before concluding the merge, verify zero
+markers repo-wide and read the FULL output (the 2026-07-06 sync shipped a
+broken merge commit because a truncated `git diff --check` hid grammars.ts's
+second hunk):
+
+```bash
+git diff --check                       # must print nothing
+grep -rn '^<<<<<<< ' src __tests__ *.md   # must match nothing
+```
+
+(`npm run build` also catches leftover markers in `.ts` files as TS1185 — but
+not in `.md`/`.json`.)
+
 If the merge goes sideways mid-resolve: `git merge --abort` returns you to a
 clean pre-merge state. Nothing is lost.
+
+First-sync data point (2026-07-06, 12 upstream commits of new-language work):
+conflicts landed in `CHANGELOG.md`, `grammars.ts` (two hunks), and `types.ts`;
+`tree-sitter.ts` and `frameworks/index.ts` auto-merged. All unions.
 
 ### 5. Validate — build, tests, downstream smoke
 
@@ -85,10 +114,19 @@ npm test
 - **Fork-critical suites that must stay green:** `unity.test.ts`,
   `unity-assets.test.ts`, `blender.test.ts`, plus upstream's
   `extraction.test.ts` / `resolution.test.ts` / `frameworks-integration.test.ts`.
-- **Known pre-existing Windows failures** (reproduce on upstream/main too —
-  confirm there before blaming the merge): `security.test.ts` symlink test
-  (needs privileges), `mcp-initialize.test.ts` / `mcp-roots.test.ts`
-  `afterEach` EPERM temp-dir cleanup.
+- **Known pre-existing Windows failures** (confirmed on pre-merge main
+  2026-07-06 — always re-confirm on the pre-merge commit before blaming the
+  merge): `security.test.ts` symlink test (needs privileges),
+  `mcp-initialize.test.ts` / `mcp-roots.test.ts` `afterEach` EPERM temp-dir
+  cleanup, and `frameworks-integration.test.ts`'s three "JVM FQN imports —
+  end-to-end" tests. Additionally `mcp-daemon.test.ts` and
+  `multi-repo-workspace.test.ts` are **flaky** on Windows
+  (process-lifecycle/timing) — they fail intermittently on clean main;
+  re-run before treating a failure as real.
+- **Discrimination procedure when anything else fails:** `git checkout main`
+  (pre-merge), run exactly the failing suites there, compare, then
+  `git checkout` back to the sync branch. A failure that reproduces at
+  baseline is not the merge's fault.
 - **`npm run build` is load-bearing, not optional:** the Unity chunk workflow
   (`C:\dev\repos\unity\tools\carve-chunk\`), chunk `CHUNK.md` manifests, and
   MCP configs all point at `dist/bin/codegraph.js` on this machine. A sync
@@ -97,13 +135,15 @@ npm test
   and probe one wiring fact —
 
   ```bash
-  node dist/bin/codegraph.js index -p C:/dev/repos/unity/tester-01
+  node dist/bin/codegraph.js index C:/dev/repos/unity/tester-01 --quiet   # path is POSITIONAL here
   node dist/bin/codegraph.js node GameManager -p C:/dev/repos/unity/tester-01
+  node dist/bin/codegraph.js callers ResetScore -p C:/dev/repos/unity/tester-01
   ```
 
-  Pass = the GameManager node still shows its scene/prefab wiring edges
-  (attached-script + UnityEvent references), and node counts are stable
-  across a second index run.
+  (Flag quirk: `index` takes its path as a positional argument; the query
+  commands take `-p`.) Pass = the GameManager scene component links to the
+  `GameManager` class (attached-script edge, both directions), and
+  `ResetScore` shows its two UnityEvent callers (`RestartButton`, `Player`).
 
 ### 6. Push and record
 
