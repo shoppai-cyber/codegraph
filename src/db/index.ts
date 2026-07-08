@@ -38,6 +38,24 @@ function configureConnection(db: SqliteDatabase): void {
 }
 
 /**
+ * Read-only connections serve CLI/query paths in sandboxes that can read the
+ * existing index but must not mutate `.codegraph/`. Keep this to connection-
+ * local pragmas only: no `journal_mode = WAL`, migrations, checkpoints, or
+ * other writes.
+ */
+function configureReadOnlyConnection(db: SqliteDatabase): void {
+  db.pragma('busy_timeout = 5000');
+  db.pragma('foreign_keys = ON');
+  db.pragma('cache_size = -64000');
+  db.pragma('temp_store = MEMORY');
+  db.pragma('mmap_size = 268435456');
+}
+
+export interface DatabaseOpenOptions {
+  readOnly?: boolean;
+}
+
+/**
  * Database connection wrapper with lifecycle management
  */
 export class DatabaseConnection {
@@ -95,24 +113,64 @@ export class DatabaseConnection {
   /**
    * Open an existing database
    */
-  static open(dbPath: string): DatabaseConnection {
+  static open(dbPath: string, options: DatabaseOpenOptions = {}): DatabaseConnection {
     if (!fs.existsSync(dbPath)) {
       throw new Error(`Database not found: ${dbPath}`);
     }
 
-    const { db, backend } = createDatabase(dbPath);
-
-    configureConnection(db);
-
-    // Check and run migrations if needed
-    const conn = new DatabaseConnection(db, dbPath, backend);
-    const currentVersion = getCurrentVersion(db);
-
-    if (currentVersion < CURRENT_SCHEMA_VERSION) {
-      runMigrations(db, currentVersion);
+    if (options.readOnly) {
+      try {
+        return DatabaseConnection.openConfigured(dbPath, options);
+      } catch (error) {
+        if (!isReadOnlyOpenFailure(error)) throw error;
+        return DatabaseConnection.openConfigured(dbPath, { readOnly: true }, true);
+      }
     }
 
-    return conn;
+    return DatabaseConnection.openConfigured(dbPath, options);
+  }
+
+  private static openConfigured(
+    dbPath: string,
+    options: DatabaseOpenOptions = {},
+    immutable = false
+  ): DatabaseConnection {
+    const { db, backend } = createDatabase(dbPath, {
+      readOnly: options.readOnly,
+      immutable,
+    });
+
+    try {
+      if (options.readOnly) {
+        configureReadOnlyConnection(db);
+      } else {
+        configureConnection(db);
+      }
+
+      // Check and run migrations if needed
+      const conn = new DatabaseConnection(db, dbPath, backend);
+      const currentVersion = getCurrentVersion(db);
+
+      if (currentVersion < CURRENT_SCHEMA_VERSION) {
+        if (options.readOnly) {
+          conn.close();
+          throw new Error(
+            `Database schema is version ${currentVersion}; CodeGraph ${CURRENT_SCHEMA_VERSION} requires migration. ` +
+              'Open the project once without read-only mode to migrate the index.'
+          );
+        }
+        runMigrations(db, currentVersion);
+      }
+
+      return conn;
+    } catch (error) {
+      try {
+        db.close();
+      } catch {
+        // Ignore cleanup failure; preserve the original open/configuration error.
+      }
+      throw error;
+    }
   }
 
   /**
@@ -257,6 +315,11 @@ export class DatabaseConnection {
     const current = statInode(this.dbPath);
     return current !== null && current !== this.openedInode;
   }
+}
+
+function isReadOnlyOpenFailure(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return /readonly|read-only|unable to open database file|SQLITE_CANTOPEN|SQLITE_READONLY/i.test(msg);
 }
 
 /**

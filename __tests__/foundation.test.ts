@@ -393,6 +393,54 @@ describe('Database Connection', () => {
 
     expect(() => DatabaseConnection.open(dbPath)).toThrow(/not found/i);
   });
+
+  it('opens an existing database in read-only mode', () => {
+    const dbPath = path.join(tempDir, 'test.db');
+    const db = DatabaseConnection.initialize(dbPath);
+    db.close();
+
+    const readOnly = DatabaseConnection.open(dbPath, { readOnly: true });
+    try {
+      expect(readOnly.isOpen()).toBe(true);
+      expect(() => readOnly.getDb().exec('CREATE TABLE should_fail (id INTEGER)')).toThrow(/read.?only/i);
+    } finally {
+      readOnly.close();
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')('falls back to immutable read-only mode for WAL DBs without writable sidecars', () => {
+    const dbPath = path.join(tempDir, 'test.db');
+    const db = DatabaseConnection.initialize(dbPath);
+    db.close();
+
+    fs.rmSync(`${dbPath}-wal`, { force: true });
+    fs.rmSync(`${dbPath}-shm`, { force: true });
+    fs.chmodSync(dbPath, 0o444);
+    fs.chmodSync(tempDir, 0o555);
+
+    let readOnly: DatabaseConnection | null = null;
+    try {
+      readOnly = DatabaseConnection.open(dbPath, { readOnly: true });
+      const row = readOnly.getDb().prepare('SELECT count(*) AS count FROM schema_versions').get() as { count: number };
+      expect(row.count).toBeGreaterThan(0);
+    } finally {
+      readOnly?.close();
+      fs.chmodSync(tempDir, 0o755);
+      fs.chmodSync(dbPath, 0o644);
+    }
+  });
+
+  it('honors CodeGraph.open readOnly mode', async () => {
+    const cg = CodeGraph.initSync(tempDir);
+    cg.close();
+
+    const readOnly = await CodeGraph.open(tempDir, { readOnly: true });
+    try {
+      expect(() => readOnly.clear()).toThrow(/read.?only/i);
+    } finally {
+      readOnly.close();
+    }
+  });
 });
 
 describe('Query Builder', () => {

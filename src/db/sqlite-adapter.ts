@@ -10,6 +10,8 @@
  * wasm fallback. When run from source instead, it requires Node >= 22.5.
  */
 
+import { pathToFileURL } from 'url';
+
 export interface SqliteStatement {
   run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
   get(...params: any[]): any;
@@ -38,6 +40,11 @@ export interface SqliteDatabase {
  */
 export type SqliteBackend = 'node-sqlite';
 
+export interface CreateDatabaseOptions {
+  readOnly?: boolean;
+  immutable?: boolean;
+}
+
 /**
  * Wraps Node's built-in `node:sqlite` (`DatabaseSync`) to match the
  * better-sqlite3 interface the rest of the code expects.
@@ -50,10 +57,19 @@ export type SqliteBackend = 'node-sqlite';
 class NodeSqliteAdapter implements SqliteDatabase {
   private _db: any;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: CreateDatabaseOptions = {}) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { DatabaseSync } = require('node:sqlite');
-    this._db = new DatabaseSync(dbPath);
+    if (options.immutable) {
+      const uri = pathToFileURL(dbPath);
+      uri.searchParams.set('mode', 'ro');
+      uri.searchParams.set('immutable', '1');
+      this._db = new DatabaseSync(uri, { readOnly: true });
+    } else if (options.readOnly) {
+      this._db = new DatabaseSync(dbPath, { readOnly: true });
+    } else {
+      this._db = new DatabaseSync(dbPath);
+    }
   }
 
   get open(): boolean {
@@ -134,9 +150,12 @@ class NodeSqliteAdapter implements SqliteDatabase {
  * report it per-instance — MCP can open multiple project DBs in one process, so
  * a process-global would race.
  */
-export function createDatabase(dbPath: string): { db: SqliteDatabase; backend: SqliteBackend } {
+export function createDatabase(
+  dbPath: string,
+  options: CreateDatabaseOptions = {}
+): { db: SqliteDatabase; backend: SqliteBackend } {
   try {
-    return { db: new NodeSqliteAdapter(dbPath), backend: 'node-sqlite' };
+    return { db: new NodeSqliteAdapter(dbPath, options), backend: 'node-sqlite' };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     throw new Error(

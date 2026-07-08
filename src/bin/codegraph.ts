@@ -790,7 +790,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const stats = cg.getStats();
       const changes = cg.getChangedFiles();
       const backend = cg.getBackend();
@@ -939,7 +939,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
 
       const limit = parseInt(options.limit || '10', 10);
       const rawResults = cg.searchNodes(search, {
@@ -1018,7 +1018,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const { ToolHandler } = await import('../mcp/tools');
       const handler = new ToolHandler(cg);
 
@@ -1235,7 +1235,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const { ToolHandler } = await import('../mcp/tools');
       const handler = new ToolHandler(cg);
 
@@ -1300,7 +1300,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
       let files = cg.getFiles();
 
       if (files.length === 0) {
@@ -1672,7 +1672,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const limit = parseInt(options.limit || '20', 10);
 
       const matches = cg.searchNodes(symbol, { limit: 50 });
@@ -1751,7 +1751,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const limit = parseInt(options.limit || '20', 10);
 
       const matches = cg.searchNodes(symbol, { limit: 50 });
@@ -1829,7 +1829,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const depth = Math.min(Math.max(parseInt(options.depth || '2', 10), 1), 10);
 
       const matches = cg.searchNodes(symbol, { limit: 50 });
@@ -1958,7 +1958,7 @@ program
       }
 
       const { default: CodeGraph } = await loadCodeGraph();
-      const cg = await CodeGraph.open(projectPath);
+      const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const maxDepth = parseInt(options.depth || '5', 10);
 
       // Common test file patterns
