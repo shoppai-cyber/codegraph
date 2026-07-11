@@ -68,3 +68,13 @@ tmux-web/
 assets/__pycache__/
 
 assets/generate-waitlist.py
+
+# Fork-local working scratch (not upstream). scratch/ is ignored working space
+# EXCEPT scratch/reports/, which holds tracked CodeGraph issue-intake reports
+# routed from AGENTS.md / CLAUDE.md.
+/scratch/*
+!/scratch/reports/
+
+# Fork-local, spent review handoff (self-describes as scratch "delete after the
+# review is done"); kept on disk but out of git. See AGENTS.md review pattern.
+/CODEX-REVIEW-HANDOFF.md
