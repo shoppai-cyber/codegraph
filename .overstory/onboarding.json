@@ -1,0 +1,136 @@
+{
+	"stampSchemaVersion": 1,
+	"onboardingVersion": 1,
+	"writer": {
+		"overstoryCommit": "2e8dd31",
+		"wrapperVersion": "2026-07-11"
+	},
+	"appliedAt": "2026-07-11T06:38:49.983Z",
+	"surfaces": {
+		"ovst-agent-defs": {
+			"class": "managed-files",
+			"files": {
+				".overstory/agent-defs/builder.md": "2328df130b9e800125d9e17060e2f9a6ee75fab6c667045ea258d4d212dc53e5",
+				".overstory/agent-defs/coordinator.md": "e1f60740843ac9378bd84ab3903cf2ee7770076f74cd97cf5da4242db43a91ae",
+				".overstory/agent-defs/lead.md": "5b6e625b48ec2034fd275a5311112c9c3f155648759a7c95bd054a4be148db5c",
+				".overstory/agent-defs/merger.md": "7e39518980f11d940e89b982d40fae29531d979b0874b26e45f95c3011021d95",
+				".overstory/agent-defs/monitor.md": "02a111658acda673a5d24162d5d9e8ff29309b83da738b86d330478f60339c14",
+				".overstory/agent-defs/orchestrator.md": "3649d8fbf4d4aebcc4cff1c8acdcbd975ae6847e85601164ecb8381aad7f18b7",
+				".overstory/agent-defs/ov-co-creation.md": "0c086dd48dfc37fdbcc929761bd3c66f79e34578fbe6c9399faf7dc3a6e60976",
+				".overstory/agent-defs/reviewer.md": "f16d7b4a0506c77c0859fb80931d929fd4033b8421e60b773d5e791b63c43f88",
+				".overstory/agent-defs/scout.md": "57dc2801a830a7371cc49b9f5347eebe6ac3622fd530d6ad3cf7f8b90095d6b0",
+				".overstory/agent-defs/workflow-supervisor.md": "d304c6833e0d3fcab659731d41395d3cf1f973a6a9c89ee687e8b8f6d4a6a7ca"
+			},
+			"algo": "sha256-raw-v1"
+		},
+		"ovst-manifest": {
+			"class": "managed-files",
+			"files": {
+				".overstory/agent-manifest.json": "373bc4aba25a68fe6aacbfdb663c27813e89609827b2d230f225878558f16e95"
+			},
+			"algo": "sha256-raw-v1"
+		},
+		"ovst-hooks": {
+			"class": "managed-files",
+			"files": {
+				".overstory/hooks.json": "2a8a62716fb344b59ae8498dff397e0437e95fbe207d4e72184891baf7431214"
+			},
+			"algo": "sha256-raw-v1"
+		},
+		"ovst-gitignore": {
+			"class": "managed-files",
+			"files": {
+				".overstory/.gitignore": "a66041e6d3f6d760624e94843da499c4b14c65ccdce021a247bf002544d0439d"
+			},
+			"algo": "sha256-raw-v1"
+		},
+		"ovst-readme": {
+			"class": "managed-files",
+			"files": {
+				".overstory/README.md": "45ab3a71b91999c648e81487c0e73d2ce922d2be398b549f7edf9296cee8fe8a"
+			},
+			"algo": "sha256-raw-v1"
+		},
+		"ovst-config": {
+			"class": "config-seeded",
+			"files": {
+				".overstory/config.yaml": "41df8d5fad5759a00e6dc42578e1f649314762fc19cc09e10aa68f16988c0486"
+			},
+			"algo": "sha256-raw-v1"
+		},
+		"instr-overstory": {
+			"class": "managed-block",
+			"files": {
+				"CLAUDE.md": "4bbf171d2ec937ff65732b13fcedd5b9e1d91baea98f31481e4c5fc6ff65a4fa",
+				"AGENTS.md": "4bbf171d2ec937ff65732b13fcedd5b9e1d91baea98f31481e4c5fc6ff65a4fa"
+			},
+			"algo": "sha256-content-v1"
+		},
+		"instr-ml": {
+			"class": "delegated-block",
+			"files": {
+				"CLAUDE.md": "364836c2e10525585f58a04899256ebf7f4f4a1cd0e99c5b4ad10a244dc6835c"
+			},
+			"algo": "sha256-content-v1",
+			"toolVersion": 3
+		},
+		"instr-sd": {
+			"class": "delegated-block",
+			"files": {
+				"CLAUDE.md": "77a487c1da3cd776138c63bbbb0b34e3b2f50a6b84c9913d25e418dbad73d9b6"
+			},
+			"algo": "sha256-content-v1",
+			"toolVersion": 1
+		},
+		"instr-cn": {
+			"class": "delegated-block",
+			"files": {
+				"CLAUDE.md": "df3e72b21ffa2dd397143175129785a39fc1dc748c1e11febf9710b2b64c1b0b"
+			},
+			"algo": "sha256-content-v1",
+			"toolVersion": 1
+		},
+		"wiki": {
+			"class": "generated-dir",
+			"files": {
+				"openwiki/": "dbdef81062941b7592be746c670bd88f70246c156490824c1c5aa1bd1b2a3b51"
+			},
+			"algo": "sha256-manifest-v1"
+		},
+		"data-ml": {
+			"class": "data",
+			"files": {
+				".mulch/mulch.config.yaml": "f0db433190c8e70368e0ef5bc650d2df92b110eb9f6d923416f495c58f2e0656"
+			},
+			"algo": "sha256-raw-v1"
+		},
+		"data-sd": {
+			"class": "data",
+			"files": {
+				".seeds/config.yaml": "229661f7083d77816a958f8a08a628c04e799cdacd3196f4dfc66c1a38eaa009",
+				".seeds/issues.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				".seeds/templates.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+			},
+			"algo": "sha256-raw-v1"
+		},
+		"data-cn": {
+			"class": "data",
+			"files": {
+				".canopy/config.yaml": "8f29b2ce76d94d2c7d50bdad5bb53722a4d1f55cd1a93261365f938100c29d5b",
+				".canopy/prompts.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				".canopy/schemas.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+			},
+			"algo": "sha256-raw-v1"
+		}
+	},
+	"history": [
+		{
+			"from": 0,
+			"to": 1,
+			"appliedAt": "2026-07-11T06:38:49.983Z",
+			"migrationId": "01KX7YCW3ZPQXC88MT41H8GWBT",
+			"outcome": "complete",
+			"receipt": "01KX7YCW3ZPQXC88MT41H8GWBT"
+		}
+	]
+}

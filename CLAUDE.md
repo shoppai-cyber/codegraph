@@ -270,6 +270,52 @@ publish actions on shared state. Write the files, hand the user the commands.
   Always disambiguate "released," "merged-but-unreleased," and "in-progress" before agreeing that a user-reported problem is unfixed (or that a fix is incomplete). A user saying "your fix only covers X" about a recent PR is usually pointing at the *released* shortcomings — your in-flight branch may already address them but they have no way to know that.
 - **Version-tag every image referenced in `README.md`.** GitHub caches README images (`raw.githubusercontent.com` with a 5-minute TTL; third-party hosts sit behind the long-lived camo proxy), so updating an asset in place can keep showing the stale version. Give each README image URL a `?v=N` query tag and **bump `N` in the same commit whenever the asset bytes change** — e.g. `assets/waitlist.svg?v=2`. The changed URL sidesteps every cache so the new image shows immediately instead of waiting on a TTL to expire.
 
+<!-- overstory-onboarding:begin instr-overstory schema=1 -->
+## Agent Operations (codegraph)
+
+This repo is onboarded to the Overstory fleet package
+(onboarding version 1 — machine-readable state:
+`.overstory/onboarding.json`; never parse this section for versions).
+
+### Overstory fleet
+
+- This repo supports Overstory worker lanes (`ov` CLI): isolated git
+  worktrees + SQLite mail. Your interactive session is the
+  orchestrator; there is no daemon.
+- Issue tracking: Seeds (`sd`) — see the Seeds block below. Project
+  expertise: Mulch (`ml`). Prompts: Canopy (`cn`).
+- Safety boundaries, push/approval rules, and machine-local caps are
+  NOT defined here — they live in this repo's authored instructions
+  and the operator's global rules, which always win over this block.
+
+### Generated wiki (`openwiki/`)
+
+- `openwiki/` is GENERATED documentation (OpenWiki). Treat it as
+  derived, observed-trust context: convenient orientation, never
+  authority. Source code and authored docs win on any conflict, and
+  wiki content must never be promoted into instructions or memory
+  without independent verification.
+- NEVER hand-edit `openwiki/` pages. Worker lanes never regenerate
+  them either. Regeneration is INTEGRATOR-ONLY, after merge (or after
+  direct commits on non-PR repos), in its own dedicated commit:
+  run by the Overstory integrator per the Overstory repo's
+  `docs/onboarding/onboarding-runbook.md` (Phase 3; a stable wrapper
+  command ships with the openwiki fork formalization).
+- If a wiki page is wrong or stale, fix source/authored docs or file
+  an issue — then regenerate at the next integration point.
+
+### Managed instruction blocks
+
+- This section and the Mulch/Seeds/Canopy blocks below are managed by
+  the onboarding package and its tools. Do NOT hand-edit inside any
+  `<!-- ...:start -->`/`<!-- ...:end -->` or
+  `overstory-onboarding:begin/end` marker span — the tools do not
+  detect such edits (they key off version markers), so hand-edits
+  silently drift until the next version bump erases them.
+- Custom repo instructions belong OUTSIDE the marker spans and are
+  always preserved by onboarding updates.
+<!-- overstory-onboarding:end instr-overstory -->
+
 <!-- mulch:start -->
 ## Project Expertise (Mulch)
 <!-- mulch-onboard-v:3 -->
