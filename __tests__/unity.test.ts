@@ -1366,6 +1366,102 @@ class Player : NetworkBehaviour
       expect(notMirror).toEqual({ nodes: [], references: [] });
     });
 
+    // --- BLOCKING 1: foreign fully-qualified NetworkBehaviour bases must NOT be claimed ---
+
+    it('emits nothing for an NGO fully-qualified NetworkBehaviour base under an open Mirror gate', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : Unity.Netcode.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a Photon Fusion fully-qualified NetworkBehaviour base under an open Mirror gate', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : Fusion.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for an unrelated dotted NetworkBehaviour base whose last segment merely collides', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : MyStuff.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- BLOCKING 2: FQ stack ownership propagates through same-file base chains ---
+
+    it('does not claim a same-file FishNet-FQ-rooted chain for Mirror (Mirror gate open via using)', () => {
+      const result = extract(`
+using Mirror;
+
+class ForeignBase : FishNet.Object.NetworkBehaviour {}
+class Child : ForeignBase
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not claim a same-file Mirror-FQ-rooted chain for FishNet (FishNet gate open via using)', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class MirrorBase : Mirror.NetworkBehaviour {}
+class Child : MirrorBase
+{
+    public override void OnStartServer() {}
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('DOES apply Mirror host rules to a same-file Mirror-rooted (bare) base chain', () => {
+      const result = extract(`
+using Mirror;
+
+class BaseNet : NetworkBehaviour {}
+class Child : BaseNet
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.CmdMove',
+        ].sort()
+      );
+    });
+
     // --- SyncVar field liveness ---
 
     it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {

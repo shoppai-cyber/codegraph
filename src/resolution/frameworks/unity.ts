@@ -82,6 +82,10 @@ interface ClassBlock {
   bodyOffset: number;
   filePath: string;
   hostBase: string | null;
+  // The gated stacks whose gated rules (host callbacks, RPC/SyncVar attributes) may apply to
+  // this class in this file — already filtered to open stacks that OWN this class's host base.
+  // Empty for ungated Tier-1 hosts (MonoBehaviour, …) and for non-host classes.
+  applicableStacks: GatedStack[];
 }
 
 interface MethodDecl {
@@ -134,6 +138,7 @@ const MONO_MESSAGES = HOST_BASE_RULES['MonoBehaviour']?.hostInvokedMethods ?? []
 
 interface GatedStack {
   name: string;
+  usingPrefixes: string[];
   requiredUsingRes: RegExp[];
   disqualifyUsingRes: RegExp[];
   fqBaseAlternative: string | null;
@@ -141,6 +146,7 @@ interface GatedStack {
   hostBases: Set<string>;
   methodAttributes: MethodAttributeRule[];
   syncVarAttribute: string | null;
+  syncVarHookAttribute: string | null;
   syncVarHookArg: string | null;
 }
 
@@ -181,6 +187,7 @@ function buildGatedStack(name: string, section: GatedStackSection | undefined): 
   );
   return {
     name,
+    usingPrefixes: gate.requiresAnyUsingPrefix ?? [],
     requiredUsingRes: (gate.requiresAnyUsingPrefix ?? []).map(usingPrefixRegex),
     disqualifyUsingRes: (gate.disqualifyingUsingPrefixes ?? []).map(usingPrefixRegex),
     fqBaseAlternative: gate.fullyQualifiedBaseAlternative ?? null,
@@ -188,6 +195,9 @@ function buildGatedStack(name: string, section: GatedStackSection | undefined): 
     hostBases: new Set(Object.keys(hostRules)),
     methodAttributes,
     syncVarAttribute: section.syncVarFields?.attribute ?? null,
+    // CONSIDER 7: consume syncVarHooks.attribute as the hook-bearing attribute, falling
+    // back to the field attribute when absent. For Mirror both are `SyncVar`.
+    syncVarHookAttribute: section.syncVarHooks?.attribute ?? section.syncVarFields?.attribute ?? null,
     syncVarHookArg: section.syncVarHooks?.argumentName ?? null,
   };
 }
@@ -199,6 +209,45 @@ const GATED_STACKS: GatedStack[] = [
 
 /** Test-only: exposes the parsed gated-stack shapes for manifest-shape assertions (F4). */
 export const __gatedStacksForTest: ReadonlyArray<GatedStack> = GATED_STACKS;
+
+// Every host-base token owned by SOME gated stack (NetworkBehaviour, …). These collide across
+// NGO/FishNet/Mirror/Fusion, so a bare occurrence is only a host under an OPEN owning gate and a
+// dotted occurrence is only a host when its full form is an open stack's FQ alternative — see
+// classifyHost. Kept distinct from the ungated Tier-1 HOST_BASES (MonoBehaviour, …).
+const GATED_HOST_TOKENS = new Set<string>();
+for (const stack of GATED_STACKS) for (const base of stack.hostBases) GATED_HOST_TOKENS.add(base);
+
+// Host classification descriptor propagated through same-file base chains: the resolved host-base
+// token plus the OPEN gated stacks whose gated rules may apply to it (empty for Tier-1 hosts).
+interface HostInfo {
+  hostBase: string;
+  applicable: GatedStack[];
+}
+
+/**
+ * Classify a single resolved base clause as a Unity host base, or null if it is not one.
+ *  - Tier-1 ungated hosts (MonoBehaviour, …) match by short token (a dotted
+ *    `UnityEngine.MonoBehaviour` still counts) and carry `applicable: []`.
+ *  - Tier-2 gated tokens (NetworkBehaviour, …) are admitted ONLY when they resolve to an OPEN
+ *    owning stack: a DOTTED token must equal that stack's `fullyQualifiedBaseAlternative`
+ *    exactly (so a foreign `Unity.Netcode.NetworkBehaviour` / `Fusion.NetworkBehaviour` /
+ *    `MyStuff.NetworkBehaviour` whose last segment merely collides emits nothing — BLOCKING 1);
+ *    a BARE token applies to every open stack that owns it. `applicable` is the surviving
+ *    open owners; an empty result means "not a host here" (null).
+ */
+function classifyHost(fullBase: string, openStacks: GatedStack[]): HostInfo | null {
+  const short = fullBase.split('.').pop() || fullBase;
+  if (HOST_BASES.has(short)) return { hostBase: short, applicable: [] };
+  if (GATED_HOST_TOKENS.has(short)) {
+    if (fullBase.includes('.')) {
+      const owners = openStacks.filter((s) => s.fqBaseAlternative === fullBase);
+      return owners.length ? { hostBase: short, applicable: owners } : null;
+    }
+    const applicable = openStacks.filter((s) => s.hostBases.has(short));
+    return applicable.length ? { hostBase: short, applicable } : null;
+  }
+  return null;
+}
 
 /**
  * Stacks whose per-file gate is open. Two-phase (F2):
@@ -443,19 +492,33 @@ function parseClassBlocks(content: string, filePath: string): { classes: ClassBl
       bodyOffset: openBrace + 1,
       filePath,
       hostBase: null,
+      applicableStacks: [],
     });
   }
 
   // Gate resolution happens AFTER class parsing so FQ-base evidence (F2) can be checked
   // against real base clauses. Exclusion is still pre-parse (inside openStacksFor).
   const openStacks = openStacksFor(safe, classes);
-  const activeHostBases = new Set(HOST_BASES);
-  for (const stack of openStacks) for (const base of stack.hostBases) activeHostBases.add(base);
 
-  const directHostByName = new Map<string, string>();
+  // Direct host classification from a class's OWN resolved bases. fullBases carries the dotted
+  // form so classifyHost distinguishes a foreign FQ token from an owning stack's FQ alternative
+  // (BLOCKING 1); the returned HostInfo carries the open owning stacks so FQ ownership can
+  // propagate (BLOCKING 2). Evaluated per-block (not read back from the name map) so partial
+  // class blocks sharing a name stay independent — a base-less partial block is not a host.
+  const directInfoFor = (cls: ClassBlock): HostInfo | null => {
+    for (const full of cls.fullBases) {
+      const info = classifyHost(full, openStacks);
+      if (info) return info;
+    }
+    return null;
+  };
+
+  // Name → direct HostInfo, the lookup target when another class in the same file names it as a
+  // base. The whole descriptor propagates, so a same-file chain inherits its root's owning stacks.
+  const directHostByName = new Map<string, HostInfo>();
   for (const cls of classes) {
-    const direct = cls.bases.find((b) => activeHostBases.has(b));
-    if (direct) directHostByName.set(cls.name, direct);
+    const info = directInfoFor(cls);
+    if (info) directHostByName.set(cls.name, info);
   }
 
   let changed = true;
@@ -463,20 +526,22 @@ function parseClassBlocks(content: string, filePath: string): { classes: ClassBl
     changed = false;
     for (const cls of classes) {
       if (directHostByName.has(cls.name)) continue;
-      const inherited = cls.bases.find((b) => directHostByName.has(b));
-      if (inherited) {
-        directHostByName.set(cls.name, directHostByName.get(inherited)!);
+      const inheritedBase = cls.bases.find((b) => directHostByName.has(b));
+      if (inheritedBase) {
+        directHostByName.set(cls.name, directHostByName.get(inheritedBase)!);
         changed = true;
       }
     }
   }
 
   const resolved = classes.map((cls) => {
-    const direct = cls.bases.find((b) => activeHostBases.has(b));
-    const chained = cls.bases.find((b) => directHostByName.has(b));
+    const direct = directInfoFor(cls);
+    const chainedBase = cls.bases.find((b) => directHostByName.has(b));
+    const info = direct ?? (chainedBase ? directHostByName.get(chainedBase)! : null);
     return {
       ...cls,
-      hostBase: direct || (chained ? directHostByName.get(chained)! : null),
+      hostBase: info ? info.hostBase : null,
+      applicableStacks: info ? info.applicable : [],
     };
   });
   return { classes: resolved, openStacks };
@@ -836,27 +901,23 @@ function processClass(
   seenNodes: Set<string>,
   seenRefs: Set<string>,
   cls: ClassBlock,
-  originalContent: string,
-  openStacks: GatedStack[]
+  originalContent: string
 ): void {
   const methods = parseMethods(cls, originalContent);
   const fields = parseFields(cls, originalContent);
   const properties = parseProperties(cls, originalContent);
 
-  // A class whose base is written fully-qualified as some gated stack's fqBaseAlternative
-  // (e.g. `: Mirror.NetworkBehaviour` / `: FishNet.Object.NetworkBehaviour`) is UNAMBIGUOUSLY
-  // owned by THAT stack — the bare-token host base (`NetworkBehaviour`) collides across stacks,
-  // but the FQ base names exactly one. Only the owning stack may treat it as a networking host,
-  // and only when that stack's gate is open. This keeps a competing stack whose gate happens to
-  // be open in the same file (via its own `using`) from claiming a class rooted in another
-  // stack's FQ base. Bare-base classes have no owner and fall through to every open stack
-  // (mutual using-disqualification already guarantees ≤1 open stack in that case).
-  const ownerStack = GATED_STACKS.find(
-    (s) => s.fqBaseAlternative !== null && cls.fullBases.includes(s.fqBaseAlternative)
-  );
-  const applicableStacks = ownerStack
-    ? openStacks.filter((s) => s.name === ownerStack.name)
-    : openStacks;
+  // The gated stacks whose gated rules may apply to this class were resolved during class parsing
+  // (classifyHost + same-file chain propagation) and carried on the class as `applicableStacks`:
+  //  - a class rooted in a stack's fully-qualified base (`: Mirror.NetworkBehaviour`) is owned by
+  //    THAT stack alone, so a competing stack whose gate is open in the same file cannot claim it;
+  //  - a foreign FQ base whose last segment merely collides (`Unity.Netcode.NetworkBehaviour`)
+  //    resolved to no host at all, so it isn't here;
+  //  - a bare-token host applies to every open owning stack (mutual using-disqualification already
+  //    guarantees ≤1 open stack in that case);
+  //  - ownership propagates through same-file base chains, so a derived class is bound to the same
+  //    stack(s) as the base it ultimately roots in (BLOCKING 1/2).
+  const applicableStacks = cls.applicableStacks;
 
   if (cls.hostBase) {
     const stackRule = cls.hostBase
@@ -1152,9 +1213,9 @@ export const unityResolver: FrameworkResolver = {
     const result: FrameworkExtractionResult = { nodes: [], references: [] };
     const seenNodes = new Set<string>();
     const seenRefs = new Set<string>();
-    const { classes, openStacks } = parseClassBlocks(content, filePath);
+    const { classes } = parseClassBlocks(content, filePath);
     for (const cls of classes) {
-      processClass(result, seenNodes, seenRefs, cls, content, openStacks);
+      processClass(result, seenNodes, seenRefs, cls, content);
     }
     return result;
   },
