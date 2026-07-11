@@ -108,3 +108,89 @@ unresolved-node noise, M-4 ALL-CAPS constant admitted as class, M-5 detection on
 escaped-quote literal, M-8 trailing-comma `register_class(X,)`. All edge cases; none affects the
 mainline patterns. **I-3** (work-item-6 cross-file host-callback ceiling) confirmed genuine, already
 documented above — no code change.
+
+---
+
+# CHANGES — Unity Mirror networking (Tier-2 gated resolver)
+
+Adds **Mirror (MirrorNetworking) 96.x** networking liveness to the Unity framework resolver,
+alongside the existing FishNet Tier-2 support. Same pattern as FishNet: a per-file gate keeps the
+colliding networking tokens (`NetworkBehaviour`, `[ClientRpc]`, `[TargetRpc]`) from being confused
+across stacks, and every row emits nothing unless its precondition is structurally proven in the same
+file. Corpus-verified against Mirror 96.10.3 + Weaver source (`resolver-facts/MIRROR-RESOLVER-FACTS.md`,
+in the mirror-docs database, not this repo).
+
+## Why
+
+Mirror's networking entry points are invoked by the Mirror runtime / Weaver-rewritten call sites, not
+(only) by in-project calls, so without domain knowledge they look uncalled:
+
+- `NetworkBehaviour` lifecycle/serialization callbacks — the 8 `OnStart*`/`OnStop*` (server, client,
+  local-player, authority), `OnSerialize`/`OnDeserialize`, and the `SerializeSyncVars`/`DeserializeSyncVars`
+  overrides Mirror invokes by reflection/Weaver.
+- `[Command]` / `[ClientRpc]` / `[TargetRpc]` methods — the Weaver moves the body aside and rewrites
+  the call site into a network send; the remote-receive dispatch reaches the method with no in-project
+  caller.
+- `[SyncVar]` fields — enumerated and rewritten by the Weaver; a `hook = nameof(M)` / `"M"` names a
+  change-callback resolved from a plain string, so the hook method otherwise looks dead.
+
+Because those tokens collide with NGO, FishNet, and Photon Fusion, matching them unconditionally would
+fabricate edges in a project on any of those stacks.
+
+## Files
+
+| File | Change |
+|---|---|
+| `src/resolution/frameworks/unity-invocation-table.json` | **NEW `mirror` section** — gate (NGO/FishNet/Fusion disqualifiers), `NetworkBehaviour` host callbacks + MonoBehaviour union, `attributeEntryPoints` (Command/ClientRpc/TargetRpc), `syncVarFields`, `syncVarHooks`, excluded/deferred rows, eventSubscriptions. Top-level `consumed.mirror` + version 0.3.0 → 0.4.0. |
+| `src/resolution/frameworks/unity.ts` | Consumes `TABLE.mirror` through the generic `GATED_STACKS` mechanism (added in the preceding refactor). NEW: SyncVar field + hook emission block; FQ-base stack-ownership guard so an open Mirror gate can't claim a FishNet-FQ-based class. |
+| `__tests__/unity.test.ts` | **NEW `describe('extract() — Mirror networking (Tier 2, gated)')`** — 21 cases, exhaustive `.toEqual` assertions. |
+
+This work sits on top of two preceding commits on the same branch: a **generic-GATED_STACKS refactor**
+(generalizes the FishNet-specific gate/host/RPC code to run any number of stacks from data, no behavior
+change, all FishNet tests green) and a **gate-hardening pass** (F1–F4 below).
+
+## Design decisions
+
+- **Emit-nothing, uniformly.** Every ambiguous Mirror case emits nothing: static `[SyncVar]`,
+  overloaded hook name, qualified/non-literal hook value, hook naming an absent method, cross-file
+  base chain, cross-file SyncVar field. A missed edge beats a fabricated one — documented as coverage
+  bounds in the JSON + facts doc, not silently narrowed.
+- **Data-driven, shared mechanism.** The `mirror` JSON section is the only Mirror domain-rule source;
+  `unity.ts` reads it through the same `GATED_STACKS` runtime that serves FishNet. Adding Mirror was
+  (after the refactor) almost entirely a JSON change plus the SyncVar block the refactor left dormant.
+- **SyncVar field liveness reuses the serialized-field emission shape.** A non-static `[SyncVar]` field
+  emits the same `unity:field:` reference (plus a local-type type-ref) the Tier-1 serialized-field rule
+  already emits — no new reference kind.
+- **SyncVar hook matching is aligned with the Weaver, not narrower.** Mirror's `FindHookMethod` searches
+  only the declaring type's own methods (`td.GetMethods()` → `td.Methods`), so same-class-block
+  resolution is exactly the Weaver's scope. Overloads are deliberately not disambiguated (the Weaver
+  picks by the 2-param signature; we won't guess a signature).
+- **RPC self-reference supplements, does not assert-uncalled.** Because Mirror RPC methods are commonly
+  called directly in user code (Weaver-rewritten call site), the synthetic entry-point reference is
+  additive to any real callers.
+- **FQ base pins to its owning stack.** A class based on a fully-qualified `X.NetworkBehaviour` is
+  claimed only by the stack whose `fullyQualifiedBaseAlternative` matches, and only when that stack's
+  gate is open — so activating Mirror does not let an open Mirror gate claim a class rooted in
+  `FishNet.Object.NetworkBehaviour` (regression-locked by the preserved FishNet characterization test).
+
+## Gate-hardening (F1–F4, preceding commit, shared across all gated stacks)
+
+- **F1** — the FishNet gate now also disqualifies on Photon Fusion (`using Fusion`), matching the
+  Mirror gate's disqualifier set.
+- **F2** — the fully-qualified base alternative is matched against **parsed base clauses only**, not a
+  file-wide token search: `X.NetworkBehaviour` as a field type no longer opens a gate.
+- **F3** — the required/disqualifying `using` regexes reject **alias directives**
+  (`using Mirror = …;`): an alias is not a namespace import, and does not open (or close) a gate.
+- **F4** — the host-base loader filters documentation-only keys (`note`, `detection`) out of each
+  stack's host-base rule set, so a doc key can't be read as a host base.
+
+## Verification
+
+- `npx vitest run __tests__/unity.test.ts`: **67 passed / 67** (41 pre-existing Tier-1/FishNet + 2
+  Phase-0 characterization + 6 gate-hardening + 3 stack/registration + the 21-case Mirror block; no
+  pre-existing FishNet assertion weakened or removed).
+- `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**.
+- **Corpus verification (Mirror 96.10.3, `mirror_docs.sqlite`): ZERO corrections.** All 12 host
+  callbacks, `NetworkBehaviour : MonoBehaviour`, the 3 RPC + guard + editor attribute classes,
+  `SyncVarAttribute.hook`, the deferred host-base virtual counts, and the SyncObject Action-callback
+  surfaces match the JSON exactly. Weaver `FindHookMethod`/`ProcessSyncVar` signatures confirmed.
