@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { unityResolver } from '../src/resolution/frameworks/unity';
+import { unityResolver, __gatedStacksForTest } from '../src/resolution/frameworks/unity';
 import { getFrameworkResolver } from '../src/resolution/frameworks';
 import type {
   FrameworkExtractionResult,
@@ -1088,6 +1088,87 @@ class Player : NetworkBehaviour
 `);
       expect(nodeNames(subNamespace)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
       expect(refPairs(subNamespace)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+  });
+
+  describe('extract() — gate hardening (F1–F4)', () => {
+    it('F1: closes the FishNet gate when Photon Fusion is imported alongside FishNet', () => {
+      const result = extract(`
+using FishNet.Managing;
+using Fusion;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    void Update() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('F2: a fully-qualified FishNet base token as a field TYPE does not open the gate', () => {
+      const result = extract(`
+class Holder
+{
+    FishNet.Object.NetworkBehaviour reference;
+}
+
+class Other : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('F2: a fully-qualified FishNet base token in a real base clause still opens the gate', () => {
+      const result = extract(`
+class Player : FishNet.Object.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('F3: a required-prefix using-ALIAS directive is not gate evidence', () => {
+      const result = extract(`
+using FishNet = Some.Other.Namespace;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('F3: a disqualifier-prefix using-ALIAS directive does not close the gate', () => {
+      const result = extract(`
+using FishNet.Object;
+using Mirror = Some.Other.Namespace;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('F4: parsed stack host-base rules carry only object rules with a method list (no doc keys)', () => {
+      expect(__gatedStacksForTest.length).toBeGreaterThan(0);
+      for (const stack of __gatedStacksForTest) {
+        expect(stack.hostBases.has('note')).toBe(false);
+        expect(stack.hostBases.has('detection')).toBe(false);
+        for (const base of stack.hostBases) {
+          expect(Array.isArray(stack.hostRules[base]!.hostInvokedMethods)).toBe(true);
+        }
+      }
+      const fishnet = __gatedStacksForTest.find((s) => s.name === 'fishnet');
+      expect(fishnet?.hostBases.has('NetworkBehaviour')).toBe(true);
     });
   });
 

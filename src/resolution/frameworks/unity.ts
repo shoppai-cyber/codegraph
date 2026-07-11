@@ -75,6 +75,7 @@ interface InvocationTable {
 interface ClassBlock {
   name: string;
   bases: string[];
+  fullBases: string[];
   attributes: AttributeUse[];
   body: string;
   rawBody: string;
@@ -148,8 +149,11 @@ function escapeRegExp(text: string): string {
 }
 
 function usingPrefixRegex(prefix: string): RegExp {
-  // Matches a real `using [static] <prefix>...;` directive with the prefix at a name boundary.
-  return new RegExp(`^\\s*using\\s+(?:static\\s+)?${escapeRegExp(prefix)}\\b`, 'm');
+  // Matches a real `using [static] <prefix>;` or `using [static] <prefix>.<sub>;` namespace
+  // import. The post-prefix token is constrained to `.` (sub-namespace) or `;` (exact import)
+  // so that a longer identifier (`MirrorSharp`) and an ALIAS directive (`using Mirror = X;`,
+  // whose next token is `=`) are both rejected — only real namespace imports count (F3).
+  return new RegExp(`^\\s*using\\s+(?:static\\s+)?${escapeRegExp(prefix)}(?:\\.|\\s*;)`, 'm');
 }
 
 // Loader (decision 3 / F4): only object values carrying a string[] `hostInvokedMethods`
@@ -193,20 +197,23 @@ const GATED_STACKS: GatedStack[] = [
   buildGatedStack('mirror', TABLE.mirror),
 ].filter((s): s is GatedStack => s !== null);
 
+/** Test-only: exposes the parsed gated-stack shapes for manifest-shape assertions (F4). */
+export const __gatedStacksForTest: ReadonlyArray<GatedStack> = GATED_STACKS;
+
 /**
- * Stacks whose per-file gate is open. A stack opens when a required `using` prefix is
- * present (or its fully-qualified base alternative appears) AND no disqualifying competitor
- * `using` is present; exclusion always wins. Read from comment-stripped, string-masked source.
- *
- * NOTE (Phase 1): FQ-base evidence is still a file-wide token test here, matching the
- * pre-refactor behavior. Phase 2 (F2) restricts it to parsed class base clauses.
+ * Stacks whose per-file gate is open. Two-phase (F2):
+ *  - EXCLUSION (a disqualifying competitor `using`) always wins and is decidable pre-parse.
+ *  - EVIDENCE is either a required namespace import OR the stack's fully-qualified base
+ *    alternative appearing as a PARSED CLASS BASE clause — a bare occurrence of that token
+ *    elsewhere (e.g. a field/parameter type) never opens the gate.
+ * Read from comment-stripped, string-masked source.
  */
-function openStacksFor(safe: string): GatedStack[] {
+function openStacksFor(safe: string, classes: ClassBlock[]): GatedStack[] {
   return GATED_STACKS.filter((stack) => {
     if (stack.disqualifyUsingRes.some((re) => re.test(safe))) return false;
     if (stack.requiredUsingRes.some((re) => re.test(safe))) return true;
     if (stack.fqBaseAlternative) {
-      return new RegExp(`\\b${escapeRegExp(stack.fqBaseAlternative)}\\b`).test(safe);
+      return classes.some((cls) => cls.fullBases.includes(stack.fqBaseAlternative!));
     }
     return false;
   });
@@ -386,7 +393,9 @@ function stripGenericSuffix(base: string): string {
   return (generic === -1 ? base : base.slice(0, generic)).trim();
 }
 
-function resolveBaseName(base: string, aliases: Map<string, string>): string {
+// Full alias-resolved dotted base form (generic suffix stripped) — e.g.
+// `FishNet.Object.NetworkBehaviour`. Used for gate FQ-base evidence (F2).
+function resolveBaseFull(base: string, aliases: Map<string, string>): string {
   let value = stripGenericSuffix(base.trim());
   const dot = value.indexOf('.');
   if (dot !== -1) {
@@ -396,7 +405,7 @@ function resolveBaseName(base: string, aliases: Map<string, string>): string {
   } else {
     value = aliases.get(value) || value;
   }
-  return value.split('.').pop() || value;
+  return value;
 }
 
 function parseAliases(content: string): Map<string, string> {
@@ -412,9 +421,6 @@ function parseAliases(content: string): Map<string, string> {
 function parseClassBlocks(content: string, filePath: string): { classes: ClassBlock[]; openStacks: GatedStack[] } {
   const noComments = stripCommentsForRegex(content, 'csharp');
   const safe = maskStringLiterals(noComments);
-  const openStacks = openStacksFor(safe);
-  const activeHostBases = new Set(HOST_BASES);
-  for (const stack of openStacks) for (const base of stack.hostBases) activeHostBases.add(base);
   const aliases = parseAliases(safe);
   const classes: ClassBlock[] = [];
   const classRegex = /(?:\b(?:public|private|protected|internal|sealed|abstract|partial|static|new)\s+)*class\s+([A-Za-z_]\w*)(?:\s*:\s*([^{]+))?\s*\{/g;
@@ -424,10 +430,13 @@ function parseClassBlocks(content: string, filePath: string): { classes: ClassBl
     if (openBrace === -1) continue;
     const closeBrace = findMatchingBrace(safe, openBrace);
     if (closeBrace === -1) continue;
-    const bases = splitTopLevel(match[2] || '').map((b) => resolveBaseName(b, aliases));
+    const baseTokens = splitTopLevel(match[2] || '');
+    const fullBases = baseTokens.map((b) => resolveBaseFull(b, aliases));
+    const bases = fullBases.map((b) => b.split('.').pop() || b);
     classes.push({
       name: match[1]!,
       bases,
+      fullBases,
       attributes: leadingAttributes(safe, match.index),
       body: safe.slice(openBrace + 1, closeBrace),
       rawBody: noComments.slice(openBrace + 1, closeBrace),
@@ -436,6 +445,12 @@ function parseClassBlocks(content: string, filePath: string): { classes: ClassBl
       hostBase: null,
     });
   }
+
+  // Gate resolution happens AFTER class parsing so FQ-base evidence (F2) can be checked
+  // against real base clauses. Exclusion is still pre-parse (inside openStacksFor).
+  const openStacks = openStacksFor(safe, classes);
+  const activeHostBases = new Set(HOST_BASES);
+  for (const stack of openStacks) for (const base of stack.hostBases) activeHostBases.add(base);
 
   const directHostByName = new Map<string, string>();
   for (const cls of classes) {
