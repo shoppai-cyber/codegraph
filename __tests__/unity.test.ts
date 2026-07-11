@@ -1172,6 +1172,349 @@ class Player : NetworkBehaviour
     });
   });
 
+  describe('extract() — Mirror networking (Tier 2, gated)', () => {
+    it('registers a mirror gated stack with a NetworkBehaviour host base', () => {
+      const mirror = __gatedStacksForTest.find((s) => s.name === 'mirror');
+      expect(mirror).toBeDefined();
+      expect(mirror?.hostBases.has('NetworkBehaviour')).toBe(true);
+      expect(mirror?.syncVarAttribute).toBe('SyncVar');
+      expect(mirror?.syncVarHookArg).toBe('hook');
+    });
+
+    it('emits NetworkBehaviour callbacks and MonoBehaviour-message union when the Mirror gate is open', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    public override void OnStopClient() {}
+    public override void OnStartLocalPlayer() {}
+    public override bool OnSerialize(NetworkWriter writer, bool initialState) { return true; }
+    protected override void SerializeSyncVars(NetworkWriter writer, bool initialState) {}
+    void Update() {}
+    void Helper() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY NetworkBehaviour.OnStopClient Player.OnStopClient',
+          'UNITY NetworkBehaviour.OnStartLocalPlayer Player.OnStartLocalPlayer',
+          'UNITY NetworkBehaviour.OnSerialize Player.OnSerialize',
+          'UNITY NetworkBehaviour.SerializeSyncVars Player.SerializeSyncVars',
+          'UNITY NetworkBehaviour.Update Player.Update',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Player.OnStartServer',
+          'references:unity:host:Player.OnStopClient',
+          'references:unity:host:Player.OnStartLocalPlayer',
+          'references:unity:host:Player.OnSerialize',
+          'references:unity:host:Player.SerializeSyncVars',
+          'references:unity:host:Player.Update',
+        ].sort()
+      );
+    });
+
+    it('emits nothing for a NetworkBehaviour class with no Mirror using', () => {
+      const result = extract(`
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    void Update() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a competing stack is imported alongside Mirror (collision guard)', () => {
+      const netcode = extract(`
+using Mirror;
+using Unity.Netcode;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(netcode).toEqual({ nodes: [], references: [] });
+
+      const fishnet = extract(`
+using Mirror;
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(fishnet).toEqual({ nodes: [], references: [] });
+
+      const fusion = extract(`
+using Mirror;
+using Fusion;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(fusion).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits Command / ClientRpc / TargetRpc entry points on a NetworkBehaviour-based class', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Command] void CmdMove() {}
+    [ClientRpc] void RpcMove() {}
+    [TargetRpc] void TargetMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY attribute ClientRpc Player.RpcMove',
+          'UNITY attribute Command Player.CmdMove',
+          'UNITY attribute TargetRpc Player.TargetMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:method:Player.CmdMove',
+          'references:unity:method:Player.RpcMove',
+          'references:unity:method:Player.TargetMove',
+        ].sort()
+      );
+    });
+
+    it('emits nothing for Mirror RPC attributes on a non-NetworkBehaviour class', () => {
+      const result = extract(`
+using Mirror;
+
+class PlainHelper
+{
+    [Command] void CmdMove() {}
+    [ClientRpc] void RpcMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for the Mirror Server/Client guard attributes', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Server] void ServerOnly() {}
+    [ServerCallback] void ServerCb() {}
+    [Client] void ClientOnly() {}
+    [ClientCallback] void ClientCb() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens the gate on a fully-qualified Mirror.NetworkBehaviour base without a using', () => {
+      const result = extract(`
+class Player : Mirror.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY attribute Command Player.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Player.OnStartServer',
+          'references:unity:method:Player.CmdMove',
+        ].sort()
+      );
+    });
+
+    it('closes the gate when a FQ Mirror base is combined with a competing using (exclusion wins over FQ evidence)', () => {
+      const result = extract(`
+using Unity.Netcode;
+
+class Player : Mirror.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens only on the real Mirror namespace, not a longer identifier (prefix boundary)', () => {
+      const notMirror = extract(`
+using MirrorX;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(notMirror).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- SyncVar field liveness ---
+
+    it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int health;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('emits a type reference for a [SyncVar] field whose declared type is local', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData data;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.data']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.data', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('emits nothing for a STATIC [SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] static int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a [SyncVar] field on a non-NetworkBehaviour class', () => {
+      const result = extract(`
+using Mirror;
+
+class PlainHelper
+{
+    [SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- SyncVar hook resolution ---
+
+    it('resolves a [SyncVar(hook = nameof(Method))] hook to a unique same-class method', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY SyncVar field Player.health', 'UNITY SyncVar hook Player.OnHealthChanged'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.health', 'references:unity:method:Player.OnHealthChanged'].sort()
+      );
+    });
+
+    it('resolves a [SyncVar(hook = "Method")] string-literal hook to a unique same-class method', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = "OnHealthChanged")] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY SyncVar field Player.health', 'UNITY SyncVar hook Player.OnHealthChanged'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.health', 'references:unity:method:Player.OnHealthChanged'].sort()
+      );
+    });
+
+    it('keeps the field live but emits no hook ref when the hook names an OVERLOADED method', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+    void OnHealthChanged(float oldValue, float newValue) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('emits no hook ref for a qualified nameof(Other.Method) hook value', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(Other.OnHealthChanged))] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('emits no hook ref when the hook names a method absent from the class block', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('emits nothing for SyncVar rows when the Mirror gate is closed by a competing stack', () => {
+      const result = extract(`
+using Mirror;
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+  });
+
   describe('detect(), claimsReference(), and resolve()', () => {
     it('detects Unity projects with strong markers and ignores bare using-only source', () => {
       expect(

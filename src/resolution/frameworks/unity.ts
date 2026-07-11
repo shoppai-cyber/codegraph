@@ -843,9 +843,24 @@ function processClass(
   const fields = parseFields(cls, originalContent);
   const properties = parseProperties(cls, originalContent);
 
+  // A class whose base is written fully-qualified as some gated stack's fqBaseAlternative
+  // (e.g. `: Mirror.NetworkBehaviour` / `: FishNet.Object.NetworkBehaviour`) is UNAMBIGUOUSLY
+  // owned by THAT stack — the bare-token host base (`NetworkBehaviour`) collides across stacks,
+  // but the FQ base names exactly one. Only the owning stack may treat it as a networking host,
+  // and only when that stack's gate is open. This keeps a competing stack whose gate happens to
+  // be open in the same file (via its own `using`) from claiming a class rooted in another
+  // stack's FQ base. Bare-base classes have no owner and fall through to every open stack
+  // (mutual using-disqualification already guarantees ≤1 open stack in that case).
+  const ownerStack = GATED_STACKS.find(
+    (s) => s.fqBaseAlternative !== null && cls.fullBases.includes(s.fqBaseAlternative)
+  );
+  const applicableStacks = ownerStack
+    ? openStacks.filter((s) => s.name === ownerStack.name)
+    : openStacks;
+
   if (cls.hostBase) {
     const stackRule = cls.hostBase
-      ? openStacks.map((s) => s.hostRules[cls.hostBase!]).find(Boolean)
+      ? applicableStacks.map((s) => s.hostRules[cls.hostBase!]).find(Boolean)
       : undefined;
     const rule = HOST_BASE_RULES[cls.hostBase] || stackRule;
     if (rule) {
@@ -905,7 +920,7 @@ function processClass(
   // class provably host-based in an OPEN stack, and only while that stack's gate is open.
   // Mutual using-disqualification means at most one stack matches NetworkBehaviour per file.
   if (cls.hostBase) {
-    for (const stack of openStacks) {
+    for (const stack of applicableStacks) {
       if (!stack.hostBases.has(cls.hostBase)) continue;
       for (const method of methods) {
         if (!method.canEmit) continue;
@@ -936,7 +951,7 @@ function processClass(
   // class block. Every ambiguous form (qualified nameof, absent name, overloaded name,
   // static field) emits nothing per the emit-nothing policy (coverage bounds in the table).
   if (cls.hostBase) {
-    for (const stack of openStacks) {
+    for (const stack of applicableStacks) {
       if (!stack.syncVarAttribute) continue;
       if (!stack.hostBases.has(cls.hostBase)) continue;
       for (const field of fields) {
