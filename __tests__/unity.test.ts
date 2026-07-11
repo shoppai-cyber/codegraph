@@ -935,6 +935,31 @@ class Player : NetworkBehaviour
       expect(mirror).toEqual({ nodes: [], references: [] });
     });
 
+    it('emits nothing for a FOREIGN-qualified [Other.ServerRpc] under an open FishNet gate (BLOCKING 3)', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [Other.ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits a ServerRpc entry point for an OWNING-qualified [FishNet.Object.ServerRpc] (BLOCKING 3)', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [FishNet.Object.ServerRpc] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute ServerRpc Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
     it('emits RPC and prediction attribute entry points on a NetworkBehaviour-based class', () => {
       const result = extract(`
 using FishNet.Object;
@@ -1304,6 +1329,59 @@ class PlainHelper
       expect(result).toEqual({ nodes: [], references: [] });
     });
 
+    // --- attribute-name qualification (BLOCKING 3) ---
+
+    it('emits nothing for a FOREIGN-qualified [Other.Command] on a NetworkBehaviour class', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Other.Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits a Command entry point for an OWNING-qualified [Mirror.Command]', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
+    it('emits a Command entry point for the Attribute-suffixed [CommandAttribute]', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [CommandAttribute] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
+    it('emits a Command entry point for the owning-qualified + suffixed [Mirror.CommandAttribute]', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.CommandAttribute] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
     it('emits nothing for the Mirror Server/Client guard attributes', () => {
       const result = extract(`
 using Mirror;
@@ -1514,6 +1592,31 @@ class PlainHelper
 }
 `);
       expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a FOREIGN-qualified [Other.SyncVar] field (BLOCKING 3)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Other.SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('keeps an OWNING-qualified [Mirror.SyncVar] field live (BLOCKING 3)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.SyncVar] int health;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
     });
 
     // --- SyncVar hook resolution ---

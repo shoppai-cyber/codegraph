@@ -727,6 +727,41 @@ function findAttribute(attrs: AttributeUse[], name: string): AttributeUse | unde
   return attrs.find((a) => a.name === name);
 }
 
+// True when `qualifier` (the namespace part of a written attribute name, e.g. `Mirror` in
+// `[Mirror.Command]`) belongs to a gated stack's own namespace — one of its using prefixes or
+// the namespace root of its fully-qualified base. `FishNet.Object` belongs to FishNet, `Other`
+// belongs to nobody.
+function attrQualifierBelongsToStack(qualifier: string, stack: GatedStack): boolean {
+  const owners = [...stack.usingPrefixes];
+  if (stack.fqBaseAlternative) {
+    const ns = stack.fqBaseAlternative.split('.').slice(0, -1).join('.');
+    if (ns) owners.push(ns);
+  }
+  return owners.some((p) => qualifier === p || qualifier.startsWith(`${p}.`));
+}
+
+// Gated attribute matching (BLOCKING 3): inspect the RAW written attribute token, not the
+// fully-normalized name (which strips every namespace and would let a foreign `[Other.Command]`
+// masquerade as Mirror's `[Command]`). Accept a bare token (`Command`), an `Attribute`-suffixed
+// token (`CommandAttribute`), or a qualified token ONLY when the qualifier belongs to the owning
+// stack's namespace (`Mirror.Command`, `Mirror.CommandAttribute`, `FishNet.Object.ServerRpc`).
+function gatedAttributeMatches(rawName: string, ruleName: string, stack: GatedStack): boolean {
+  const segments = rawName.split('.');
+  const last = segments[segments.length - 1]!;
+  const bareLast = last.endsWith('Attribute') ? last.slice(0, -'Attribute'.length) : last;
+  if (bareLast !== ruleName) return false;
+  if (segments.length === 1) return true;
+  return attrQualifierBelongsToStack(segments.slice(0, -1).join('.'), stack);
+}
+
+function findGatedAttribute(
+  attrs: AttributeUse[],
+  ruleName: string,
+  stack: GatedStack
+): AttributeUse | undefined {
+  return attrs.find((a) => gatedAttributeMatches(a.rawName, ruleName, stack));
+}
+
 function hasSerializationAttribute(attrs: AttributeUse[]): boolean {
   return attrs.some((a) => SERIALIZATION_ATTRIBUTES.has(a.name));
 }
@@ -986,7 +1021,7 @@ function processClass(
       for (const method of methods) {
         if (!method.canEmit) continue;
         for (const rule of stack.methodAttributes) {
-          const attr = findAttribute(method.attributes, rule.attribute);
+          const attr = findGatedAttribute(method.attributes, rule.attribute, stack);
           if (!attr) continue;
           if (rule.requiresStatic && !method.isStatic) continue;
           if (rule.requiresInstance && method.isStatic) continue;
@@ -1017,7 +1052,7 @@ function processClass(
       if (!stack.hostBases.has(cls.hostBase)) continue;
       for (const field of fields) {
         if (field.isStatic) continue;
-        const attr = findAttribute(field.attributes, stack.syncVarAttribute);
+        const attr = findGatedAttribute(field.attributes, stack.syncVarAttribute, stack);
         if (!attr) continue;
         const fieldRefs = [`${FIELD_REF_PREFIX}${cls.name}.${field.name}`];
         const simple = field.typeName.split('.').pop() || field.typeName;
@@ -1032,8 +1067,17 @@ function processClass(
           fieldRefs
         );
 
-        if (!stack.syncVarHookArg) continue;
-        const hookRaw = namedArgValue(attr.args, stack.syncVarHookArg);
+        // Hook liveness reads the hook argument from the hook-bearing attribute, matched via the
+        // stack's dedicated syncVarHookAttribute (CONSIDER 7 — consumes syncVarHooks.attribute,
+        // falling back to the field attribute). For Mirror both are `SyncVar`, so the hook lives on
+        // the same attribute already found above and behavior is unchanged.
+        if (!stack.syncVarHookAttribute || !stack.syncVarHookArg) continue;
+        const hookAttr =
+          stack.syncVarHookAttribute === stack.syncVarAttribute
+            ? attr
+            : findGatedAttribute(field.attributes, stack.syncVarHookAttribute, stack);
+        if (!hookAttr) continue;
+        const hookRaw = namedArgValue(hookAttr.args, stack.syncVarHookArg);
         if (hookRaw === null) continue;
         const hookName = extractMethodNameArg(hookRaw);
         if (!hookName) continue;
