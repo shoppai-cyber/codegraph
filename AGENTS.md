@@ -32,6 +32,12 @@ live plan for the reusable Unity docs corpus + CodeGraph Unity resolver handoff.
 "the plan" or asks to update it, update that file rather than creating another plan file unless
 Kyle explicitly asks for a new versioned plan.
 
+**Current external issue intake (read on startup for CodeGraph triage):**
+`scratch/reports/daw-project-persistent-pending-added-2026-07-07.md`. Source: the fresh DAW repo
+`C:\dev\repos\sound\daw-project` reports `codegraph status` `Pending Changes: Added 2` after
+`sync` and full `index`, while the indexed file list is current. Treat as a candidate CodeGraph
+status/change-detection bug until reduced.
+
 **The template is right here in-tree** (this branch is stacked on `feat/blender-resolver`):
 - `src/resolution/frameworks/blender.ts` (~1033 LOC) — the `FrameworkResolver` implementation to mirror.
 - `src/resolution/frameworks/blender-invocation-table.json` — the domain-rule data file; `unity-invocation-table.json` mirrors its shape (a `consumed` slice the `.ts` reads + a `catalogNotes` provenance section).

@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Fork note (shoppai-cyber):** This is Kyle's private fork. For the **active fork workstream + operating rules + delegation**, read **`AGENTS.md`** (repo root) first — it is the canonical router. Everything below remains authoritative for how codegraph itself works (architecture, build/test, the REQUIRED validation methodology, house rules).
+> **Fork note (shoppai-cyber):** This is Kyle's private fork. For the **active fork workstream + operating rules + delegation**, read **`AGENTS.md`** (repo root) first — it is the canonical router. Everything below remains authoritative for how codegraph itself works (architecture, build/test, the REQUIRED validation methodology, house rules). Current fork-local issue intake is also routed from `AGENTS.md`, including the DAW pending-status report under `scratch/reports/`.
 
 ## Project Overview
 
