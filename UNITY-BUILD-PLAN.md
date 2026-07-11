@@ -1,7 +1,9 @@
 # Unity Framework Resolver Build Plan
 
-Status: post-Fable fix pass complete for Tier 1; ready for Fable re-check
-against `FABLE-IMPL-REVIEW.md`.
+Status: COMPLETE. Tier 1 re-checked and APPROVED; Tier 2 (FishNet networking,
+gated) reviewed, APPROVED, merged to main. Current state lives in
+`FABLE-IMPL-REVIEW.md` (the ledger) — this plan is historical record.
+Debugging/triage runbook: `docs/design/framework-resolver-debugging.md`.
 
 ## Baseline Confirmed
 
