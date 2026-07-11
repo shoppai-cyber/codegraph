@@ -33,14 +33,31 @@ interface TypeReferenceAttributeRule {
   attribute: string;
 }
 
-interface FishnetSection {
-  gate: {
-    requiresAnyUsingPrefix?: string[];
-    disqualifyingUsingPrefixes?: string[];
-    fullyQualifiedBaseAlternative?: string;
-  };
-  hostInvokedBases: Record<string, HostBaseRule>;
-  attributeEntryPoints: { methodAttributes: MethodAttributeRule[] };
+interface GateConfig {
+  requiresAnyUsingPrefix?: string[];
+  disqualifyingUsingPrefixes?: string[];
+  fullyQualifiedBaseAlternative?: string;
+}
+
+interface SyncVarFieldsRule {
+  attribute: string;
+}
+
+interface SyncVarHooksRule {
+  attribute: string;
+  argumentName: string;
+}
+
+// A gated networking stack (FishNet, Mirror, …). All sub-objects use the same mixed
+// documentation/runtime JSON convention as the top-level table, so the loader filters to
+// runtime shapes: host bases keep only object values carrying a string[] hostInvokedMethods,
+// method attributes keep only entries with a string `attribute`.
+interface GatedStackSection {
+  gate: GateConfig;
+  hostInvokedBases: Record<string, HostBaseRule | string>;
+  attributeEntryPoints?: { methodAttributes?: MethodAttributeRule[] };
+  syncVarFields?: SyncVarFieldsRule;
+  syncVarHooks?: SyncVarHooksRule;
 }
 
 interface InvocationTable {
@@ -51,7 +68,8 @@ interface InvocationTable {
     classAttributes: Array<{ attribute: string }>;
   };
   typeReferenceAttributes: { attributes: TypeReferenceAttributeRule[] };
-  fishnet?: FishnetSection;
+  fishnet?: GatedStackSection;
+  mirror?: GatedStackSection;
 }
 
 interface ClassBlock {
@@ -81,6 +99,7 @@ interface MemberDecl {
   typeName: string;
   attributes: AttributeUse[];
   line: number;
+  isStatic: boolean;
 }
 
 interface AttributeUse {
@@ -102,26 +121,27 @@ const METHOD_ATTRIBUTES = TABLE.attributeEntryPoints.methodAttributes;
 const CLASS_ATTRIBUTES = new Set(TABLE.attributeEntryPoints.classAttributes.map((a) => a.attribute));
 const TYPE_REFERENCE_ATTRIBUTES = new Set(TABLE.typeReferenceAttributes.attributes.map((a) => a.attribute));
 
-// FishNet (Tier 2) — a GATED networking section. NetworkBehaviour is deliberately
-// NOT in the ungated HOST_BASES (the bare token collides with NGO and Mirror); its
-// rules fire only when fishnetGateOpen() passes for the file. NetworkBehaviour's host
-// method set unions the 10 FishNet callbacks with MonoBehaviour's messages, because
-// FishNet's `NetworkBehaviour : MonoBehaviour` chain is framework-guaranteed. The union
-// is materialised from the MonoBehaviour entry so that list stays the single source.
-const FISHNET = TABLE.fishnet;
+// Gated networking stacks (Tier 2) — FishNet and Mirror. Each stack's host base
+// (NetworkBehaviour) is deliberately kept OUT of the ungated HOST_BASES because the bare
+// token collides across NGO / FishNet / Mirror / Fusion; a stack's rules fire in a file
+// only when its per-file gate is open, and mutual using-disqualification means at most one
+// netcode stack opens per file. The NetworkBehaviour host-method set unions the stack's own
+// callbacks with MonoBehaviour's messages (the `NetworkBehaviour : MonoBehaviour` chain is
+// framework-guaranteed), materialised from the MonoBehaviour entry so that list stays the
+// single source of truth (no drift).
 const MONO_MESSAGES = HOST_BASE_RULES['MonoBehaviour']?.hostInvokedMethods ?? [];
 
-const FISHNET_HOST_RULES: Record<string, HostBaseRule> = {};
-if (FISHNET) {
-  for (const [base, rule] of Object.entries(FISHNET.hostInvokedBases)) {
-    const methods = rule.includesMonoBehaviourMessages
-      ? Array.from(new Set([...rule.hostInvokedMethods, ...MONO_MESSAGES]))
-      : rule.hostInvokedMethods;
-    FISHNET_HOST_RULES[base] = { ...rule, hostInvokedMethods: methods };
-  }
+interface GatedStack {
+  name: string;
+  requiredUsingRes: RegExp[];
+  disqualifyUsingRes: RegExp[];
+  fqBaseAlternative: string | null;
+  hostRules: Record<string, HostBaseRule>;
+  hostBases: Set<string>;
+  methodAttributes: MethodAttributeRule[];
+  syncVarAttribute: string | null;
+  syncVarHookArg: string | null;
 }
-const FISHNET_HOST_BASES = new Set(Object.keys(FISHNET_HOST_RULES));
-const FISHNET_METHOD_ATTRIBUTES = FISHNET?.attributeEntryPoints?.methodAttributes ?? [];
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -132,22 +152,64 @@ function usingPrefixRegex(prefix: string): RegExp {
   return new RegExp(`^\\s*using\\s+(?:static\\s+)?${escapeRegExp(prefix)}\\b`, 'm');
 }
 
-const FISHNET_REQUIRED_USING_RES = (FISHNET?.gate?.requiresAnyUsingPrefix ?? []).map(usingPrefixRegex);
-const FISHNET_DISQUALIFY_USING_RES = (FISHNET?.gate?.disqualifyingUsingPrefixes ?? []).map(usingPrefixRegex);
-const FISHNET_FQ_BASE_RE = FISHNET?.gate?.fullyQualifiedBaseAlternative
-  ? new RegExp(`\\b${escapeRegExp(FISHNET.gate.fullyQualifiedBaseAlternative)}\\b`)
-  : null;
+// Loader (decision 3 / F4): only object values carrying a string[] `hostInvokedMethods`
+// become host-base rules; string/provenance keys (`note`, `detection`, …) are ignored
+// deterministically. NetworkBehaviour unions the stack callbacks with MonoBehaviour's.
+function loadStackHostRules(section: Record<string, HostBaseRule | string>): Record<string, HostBaseRule> {
+  const rules: Record<string, HostBaseRule> = {};
+  for (const [base, value] of Object.entries(section)) {
+    if (!value || typeof value !== 'object') continue;
+    if (!Array.isArray(value.hostInvokedMethods)) continue;
+    const methods = value.includesMonoBehaviourMessages
+      ? Array.from(new Set([...value.hostInvokedMethods, ...MONO_MESSAGES]))
+      : value.hostInvokedMethods;
+    rules[base] = { ...value, hostInvokedMethods: methods };
+  }
+  return rules;
+}
+
+function buildGatedStack(name: string, section: GatedStackSection | undefined): GatedStack | null {
+  if (!section) return null;
+  const gate = section.gate ?? {};
+  const hostRules = loadStackHostRules(section.hostInvokedBases ?? {});
+  const methodAttributes = (section.attributeEntryPoints?.methodAttributes ?? []).filter(
+    (a): a is MethodAttributeRule => !!a && typeof a.attribute === 'string'
+  );
+  return {
+    name,
+    requiredUsingRes: (gate.requiresAnyUsingPrefix ?? []).map(usingPrefixRegex),
+    disqualifyUsingRes: (gate.disqualifyingUsingPrefixes ?? []).map(usingPrefixRegex),
+    fqBaseAlternative: gate.fullyQualifiedBaseAlternative ?? null,
+    hostRules,
+    hostBases: new Set(Object.keys(hostRules)),
+    methodAttributes,
+    syncVarAttribute: section.syncVarFields?.attribute ?? null,
+    syncVarHookArg: section.syncVarHooks?.argumentName ?? null,
+  };
+}
+
+const GATED_STACKS: GatedStack[] = [
+  buildGatedStack('fishnet', TABLE.fishnet),
+  buildGatedStack('mirror', TABLE.mirror),
+].filter((s): s is GatedStack => s !== null);
 
 /**
- * True when the per-file FishNet gate is open: a FishNet using (or a fully-qualified
- * FishNet.Object.NetworkBehaviour base) is present AND no competing stack (Unity.Netcode
- * or Mirror) is imported. Read from comment-stripped, string-masked source.
+ * Stacks whose per-file gate is open. A stack opens when a required `using` prefix is
+ * present (or its fully-qualified base alternative appears) AND no disqualifying competitor
+ * `using` is present; exclusion always wins. Read from comment-stripped, string-masked source.
+ *
+ * NOTE (Phase 1): FQ-base evidence is still a file-wide token test here, matching the
+ * pre-refactor behavior. Phase 2 (F2) restricts it to parsed class base clauses.
  */
-function fishnetGateOpen(safe: string): boolean {
-  if (!FISHNET) return false;
-  if (FISHNET_DISQUALIFY_USING_RES.some((re) => re.test(safe))) return false;
-  if (FISHNET_REQUIRED_USING_RES.some((re) => re.test(safe))) return true;
-  return FISHNET_FQ_BASE_RE ? FISHNET_FQ_BASE_RE.test(safe) : false;
+function openStacksFor(safe: string): GatedStack[] {
+  return GATED_STACKS.filter((stack) => {
+    if (stack.disqualifyUsingRes.some((re) => re.test(safe))) return false;
+    if (stack.requiredUsingRes.some((re) => re.test(safe))) return true;
+    if (stack.fqBaseAlternative) {
+      return new RegExp(`\\b${escapeRegExp(stack.fqBaseAlternative)}\\b`).test(safe);
+    }
+    return false;
+  });
 }
 
 const HOST_REF_PREFIX = 'unity:host:';
@@ -347,11 +409,12 @@ function parseAliases(content: string): Map<string, string> {
   return aliases;
 }
 
-function parseClassBlocks(content: string, filePath: string): { classes: ClassBlock[]; fishnetActive: boolean } {
+function parseClassBlocks(content: string, filePath: string): { classes: ClassBlock[]; openStacks: GatedStack[] } {
   const noComments = stripCommentsForRegex(content, 'csharp');
   const safe = maskStringLiterals(noComments);
-  const fishnetActive = fishnetGateOpen(safe);
-  const activeHostBases = fishnetActive ? new Set([...HOST_BASES, ...FISHNET_HOST_BASES]) : HOST_BASES;
+  const openStacks = openStacksFor(safe);
+  const activeHostBases = new Set(HOST_BASES);
+  for (const stack of openStacks) for (const base of stack.hostBases) activeHostBases.add(base);
   const aliases = parseAliases(safe);
   const classes: ClassBlock[] = [];
   const classRegex = /(?:\b(?:public|private|protected|internal|sealed|abstract|partial|static|new)\s+)*class\s+([A-Za-z_]\w*)(?:\s*:\s*([^{]+))?\s*\{/g;
@@ -401,7 +464,7 @@ function parseClassBlocks(content: string, filePath: string): { classes: ClassBl
       hostBase: direct || (chained ? directHostByName.get(chained)! : null),
     };
   });
-  return { classes: resolved, fishnetActive };
+  return { classes: resolved, openStacks };
 }
 
 function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
@@ -473,6 +536,7 @@ function parseFields(cls: ClassBlock, originalContent: string): MemberDecl[] {
       typeName: match[2]!,
       attributes: parseAttributes(attrs),
       line: lineNumberAt(originalContent, cls.bodyOffset + match.index),
+      isStatic: /\bstatic\b/.test(match[0]!.slice((match[1] || '').length)),
     });
   }
   return fields;
@@ -490,6 +554,7 @@ function parseProperties(cls: ClassBlock, originalContent: string): MemberDecl[]
       typeName: match[2]!,
       attributes: parseAttributes(attrs),
       line: lineNumberAt(originalContent, cls.bodyOffset + match.index),
+      isStatic: /\bstatic\b/.test(match[0]!.slice((match[1] || '').length)),
     });
   }
   return properties;
@@ -592,6 +657,18 @@ function extractMethodNameArg(arg: string): string | null {
   if (literal) return literal[1]!;
   const nameof = /^nameof\s*\(\s*([A-Za-z_]\w*)\s*\)$/.exec(trimmed);
   return nameof ? nameof[1]! : null;
+}
+
+// Value of a named attribute argument (`name = <value>`), read at the top level of the
+// attribute's argument list; returns null when the name is absent. Used for [SyncVar(hook = …)].
+function namedArgValue(args: string, name: string): string | null {
+  for (const part of splitTopLevel(args)) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    return part.slice(eq + 1).trim();
+  }
+  return null;
 }
 
 function firstArgument(args: string): string {
@@ -745,14 +822,17 @@ function processClass(
   seenRefs: Set<string>,
   cls: ClassBlock,
   originalContent: string,
-  fishnetActive: boolean
+  openStacks: GatedStack[]
 ): void {
   const methods = parseMethods(cls, originalContent);
   const fields = parseFields(cls, originalContent);
   const properties = parseProperties(cls, originalContent);
 
   if (cls.hostBase) {
-    const rule = HOST_BASE_RULES[cls.hostBase] || (fishnetActive ? FISHNET_HOST_RULES[cls.hostBase] : undefined);
+    const stackRule = cls.hostBase
+      ? openStacks.map((s) => s.hostRules[cls.hostBase!]).find(Boolean)
+      : undefined;
+    const rule = HOST_BASE_RULES[cls.hostBase] || stackRule;
     if (rule) {
       const hostMethods = new Set(rule.hostInvokedMethods);
       for (const method of methods) {
@@ -806,24 +886,76 @@ function processClass(
     }
   }
 
-  // FishNet RPC/prediction attribute entry points — gated: only on a class provably
-  // NetworkBehaviour-based in this file, and only while the file's FishNet gate is open.
-  if (fishnetActive && cls.hostBase && FISHNET_HOST_BASES.has(cls.hostBase)) {
-    for (const method of methods) {
-      if (!method.canEmit) continue;
-      for (const rule of FISHNET_METHOD_ATTRIBUTES) {
-        const attr = findAttribute(method.attributes, rule.attribute);
+  // Gated networking attribute entry points (RPC / prediction / remote-call) — only on a
+  // class provably host-based in an OPEN stack, and only while that stack's gate is open.
+  // Mutual using-disqualification means at most one stack matches NetworkBehaviour per file.
+  if (cls.hostBase) {
+    for (const stack of openStacks) {
+      if (!stack.hostBases.has(cls.hostBase)) continue;
+      for (const method of methods) {
+        if (!method.canEmit) continue;
+        for (const rule of stack.methodAttributes) {
+          const attr = findAttribute(method.attributes, rule.attribute);
+          if (!attr) continue;
+          if (rule.requiresStatic && !method.isStatic) continue;
+          if (rule.requiresInstance && method.isStatic) continue;
+          pushNodeRef(
+            result,
+            seenNodes,
+            seenRefs,
+            cls.filePath,
+            method.line,
+            `UNITY attribute ${rule.attribute} ${cls.name}.${method.name}`,
+            [`${METHOD_REF_PREFIX}${cls.name}.${method.name}`]
+          );
+        }
+      }
+    }
+  }
+
+  // Gated SyncVar field + hook liveness (Mirror). A NON-STATIC [SyncVar] field on a class
+  // provably host-based in an open stack gets framework-consumed field liveness (same
+  // emission shape as the serialized-field rule below). A [SyncVar(hook = nameof(M) / "M")]
+  // additionally keeps the resolved hook method live ONLY when the hook value is a
+  // compile-time simple identifier AND names EXACTLY ONE non-overloaded method in the same
+  // class block. Every ambiguous form (qualified nameof, absent name, overloaded name,
+  // static field) emits nothing per the emit-nothing policy (coverage bounds in the table).
+  if (cls.hostBase) {
+    for (const stack of openStacks) {
+      if (!stack.syncVarAttribute) continue;
+      if (!stack.hostBases.has(cls.hostBase)) continue;
+      for (const field of fields) {
+        if (field.isStatic) continue;
+        const attr = findAttribute(field.attributes, stack.syncVarAttribute);
         if (!attr) continue;
-        if (rule.requiresStatic && !method.isStatic) continue;
-        if (rule.requiresInstance && method.isStatic) continue;
+        const fieldRefs = [`${FIELD_REF_PREFIX}${cls.name}.${field.name}`];
+        const simple = field.typeName.split('.').pop() || field.typeName;
+        if (isLocalTypeReference(field.typeName) || isLocalTypeReference(simple)) fieldRefs.push(simple);
         pushNodeRef(
           result,
           seenNodes,
           seenRefs,
           cls.filePath,
-          method.line,
-          `UNITY attribute ${rule.attribute} ${cls.name}.${method.name}`,
-          [`${METHOD_REF_PREFIX}${cls.name}.${method.name}`]
+          field.line,
+          `UNITY SyncVar field ${cls.name}.${field.name}`,
+          fieldRefs
+        );
+
+        if (!stack.syncVarHookArg) continue;
+        const hookRaw = namedArgValue(attr.args, stack.syncVarHookArg);
+        if (hookRaw === null) continue;
+        const hookName = extractMethodNameArg(hookRaw);
+        if (!hookName) continue;
+        const target = uniqueMethod(methods, hookName);
+        if (!target) continue;
+        pushNodeRef(
+          result,
+          seenNodes,
+          seenRefs,
+          cls.filePath,
+          target.line,
+          `UNITY SyncVar hook ${cls.name}.${hookName}`,
+          [`${METHOD_REF_PREFIX}${cls.name}.${hookName}`]
         );
       }
     }
@@ -990,9 +1122,9 @@ export const unityResolver: FrameworkResolver = {
     const result: FrameworkExtractionResult = { nodes: [], references: [] };
     const seenNodes = new Set<string>();
     const seenRefs = new Set<string>();
-    const { classes, fishnetActive } = parseClassBlocks(content, filePath);
+    const { classes, openStacks } = parseClassBlocks(content, filePath);
     for (const cls of classes) {
-      processClass(result, seenNodes, seenRefs, cls, content, fishnetActive);
+      processClass(result, seenNodes, seenRefs, cls, content, openStacks);
     }
     return result;
   },
