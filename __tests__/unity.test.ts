@@ -1051,6 +1051,44 @@ class Player : FishNet.Object.NetworkBehaviour
         ].sort()
       );
     });
+
+    // --- Phase 0 characterization: pins current gate behavior before the generic refactor ---
+
+    it('closes the gate when a FQ FishNet base is combined with a competing Mirror using (characterization: exclusion wins over FQ evidence)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : FishNet.Object.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens only on a real FishNet namespace segment, not a longer identifier (characterization: prefix boundary)', () => {
+      const notFishNet = extract(`
+using FishNetX;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(notFishNet).toEqual({ nodes: [], references: [] });
+
+      const subNamespace = extract(`
+using FishNet.Managing;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(nodeNames(subNamespace)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(subNamespace)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
   });
 
   describe('detect(), claimsReference(), and resolve()', () => {
