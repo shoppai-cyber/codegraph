@@ -222,14 +222,58 @@ it — when C# scope can't be modeled cheaply, emit nothing and document the bou
   the second directly-proven declaration is simply not separately represented. Pinned by a regression
   test.
 
+## r5 — no-fabrication hardening (adversarial re-review round 4)
+
+Round 4 found that simple-name matching without a C# name-identity model still fabricated edges on
+five paths. Every fix moves in one direction: when type identity is uncertain, **emit nothing** — a
+missed edge is acceptable, a fabricated edge is the defect. None builds a namespace resolver; each
+poisons the bare-name chain (or kills the bare token) on ambiguity.
+
+- **Partial merge is namespace-aware (BLOCKING 1).** All-partial blocks of one simple name are merged
+  as a single compiler type ONLY when they share an enclosing-namespace label; two one-part partial
+  `Root`s in different namespaces are unrelated types, so the name is poisoned. Missed edge: a genuine
+  cross-namespace partial we can't confirm equal is left unlinked.
+- **Any same-named non-class type poisons the chain (BLOCKING 2).** A same-simple-name `interface`/
+  `struct`/`enum`/`record` competes as a base-list target under C#'s scoped resolution, which the
+  bare-name lookup can't model. Its presence marks the name ambiguous, so a networked class of that
+  name can no longer be the sole donor.
+- **The attribute KILL keys on the alias LHS only (BLOCKING 3).** The bare-attribute KILL set is built
+  from every `using <Name> = …;` LHS regardless of the target shape (`global::`, extern `::`, dotted,
+  generic), so an alias with a `global::Other.CommandAttribute` target still kills bare `[Command]`.
+  The base-resolution alias map (below) intentionally drops those targets, so it can no longer be the
+  KILL source without re-leaking.
+- **Base aliases with two distinct bindings are unresolved (BLOCKING 4).** The base-resolution alias
+  map now resolves a name only when it has exactly one distinct binding file-wide; a namespace-scoped
+  alias rebound differently in another namespace is ambiguous and left unresolved, so it can never
+  last-wins a class onto a foreign owning base. Missed edge: a legitimately scoped alias is not
+  followed either.
+- **Locally-declared types shadow bare gated tokens (BLOCKING 5).** A bare `: NetworkBehaviour` or
+  `[Command]` is suppressed when the file locally declares a type of that name (`class NetworkBehaviour
+  {}`, `class CommandAttribute {}`) — C# binds the bare token to the local type, not the framework's,
+  so emitting a gated row would be a fabrication. A qualified/FQ spelling is unaffected; a host class
+  whose non-shadowed callbacks are live still emits them (the kill is surgical).
+- **Gate `using` recognition is token-wise (SHOULD-FIX 3).** Required/disqualifying `using` detection
+  is no longer anchored to physical line start, so a mid-line competitor (`using Mirror; using
+  FishNet.Object;`) still fires its exclusion and a `global using Mirror;` still opens the gate.
+- **Shift operators are not generic openers (SHOULD-FIX 2).** The initializer scanner recognizes
+  `<<`/`>>`/`>>>` as shift operators, so a valid `[SyncVar] int x = a << 2;` no longer bails. The bail
+  frontier is now only a lone `<` comparison and an unclosed generic.
+- **Base-less sibling partial blocks are classified (SHOULD-FIX 1).** A base-less block of a merged
+  all-partial type inherits the merged host descriptor, so members declared in a sibling block that
+  lacks the base clause are live.
+- **Known bound — inactive-`#if` alias KILL (CONSIDER 1).** The masked source does not evaluate
+  preprocessor conditions, so a `using` alias inside `#if false` still enters the KILL set and can
+  suppress a live bare `[Command]` elsewhere. Consistent with the file-wide no-scope strategy; errs
+  toward silence.
+
 ## Verification
 
-- `npx vitest run __tests__/unity.test.ts`: **129 passed / 129**. Per describe block (sums to 129):
-  1 top-level + 12 host-base/lifecycle + 16 fields/attributes/strings + 16 FishNet + 6 gate-hardening
-  (F1–F4) + 74 Mirror + 4 detect/claimsReference/resolve. No pre-existing FishNet or Tier-1 assertion
-  was weakened or removed — the round-3 additions only add cases, except one round-2 alias test whose
-  asserted behavior the KILL rule deliberately reverses (an owning-stack alias now kills bare
-  `[Command]`). (Round 1 was 97; round 2 added 17 to 114; round 3 added 15 to 129.)
+- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **178 passed / 178**
+  (unity.test.ts 142, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
+  and SHOULD-FIX) and rewrote two tests whose fixtures were invalid C# or documented the pre-fix bug:
+  the same-named-struct case now asserts the poison (emit nothing), and the base-less-partial case now
+  asserts the sibling block's members are live. (Round 1 was 97; round 2 → 114; round 3 → 131 for
+  unity.test.ts; round 4 → 142.)
 - `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**.
 - **Corpus verification (Mirror 96.10.3, `mirror_docs.sqlite`): ZERO corrections.** All 12 host
   callbacks, `NetworkBehaviour : MonoBehaviour`, the 3 RPC + guard + editor attribute classes,
