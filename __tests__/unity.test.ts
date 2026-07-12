@@ -1001,6 +1001,21 @@ class Player : NetworkBehaviour
       expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
     });
 
+    it('emits nothing for a GATE-PREFIX-qualified [FishNet.ServerRpc] — attrs live in FishNet.Object (BLOCKING 2 r3)', () => {
+      // `FishNet` is the gate namespace; FishNet's RPC attributes live in `FishNet.Object`. A
+      // `[FishNet.ServerRpc]` is a custom `FishNet.ServerRpcAttribute`, not the framework's, so it
+      // must not emit even with the gate open.
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [FishNet.ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
     it('emits nothing for a DESCENDANT-qualified [FishNet.Whatever.ServerRpc] (exact qualifier only, BLOCKING 2 r2)', () => {
       const result = extract(`
 using FishNet.Object;
@@ -1554,7 +1569,10 @@ class Player : NetworkBehaviour
       expect(result).toEqual({ nodes: [], references: [] });
     });
 
-    it('still emits when an alias resolves the bare token to Mirror own attribute', () => {
+    it('KILLS the bare [Command] token file-wide when an alias rebinds that name, even to Mirror own (BLOCKING 2 r3)', () => {
+      // Conservative KILL rule (round 3): any `using Command = …;` — regardless of target, including
+      // Mirror's own attribute — makes bare `[Command]` unreliable, so it is rejected file-wide.
+      // This is a deliberately accepted missed edge (a qualified `[Mirror.Command]` still emits).
       const result = extract(`
 using Mirror;
 using Command = Mirror.CommandAttribute;
@@ -1564,8 +1582,56 @@ class Player : NetworkBehaviour
     [Command] void CmdMove() {}
 }
 `);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still emits bare [Command] when a NON-colliding alias name is present (BLOCKING 2 r3)', () => {
+      const result = extract(`
+using Mirror;
+using Cmd = Mirror.CommandAttribute;
+
+class Player : NetworkBehaviour
+{
+    [Command] void CmdMove() {}
+}
+`);
       expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
       expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
+    it('KILLS bare [Command] from a SAME-LINE alias directive (BLOCKING 2 r3)', () => {
+      const result = extract(`
+using Mirror; using Command = Other.CommandAttribute;
+
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('KILLS bare [Command] from a NAMESPACE-SCOPED alias directive, in either declaration order (BLOCKING 2 r3)', () => {
+      const forward = extract(`
+using Mirror;
+namespace A {
+    using Command = Other.CommandAttribute;
+    class Victim : Mirror.NetworkBehaviour { [Command] void CmdMove() {} }
+}
+namespace B {
+    using Command = Mirror.CommandAttribute;
+}
+`);
+      expect(forward).toEqual({ nodes: [], references: [] });
+
+      const reversed = extract(`
+using Mirror;
+namespace B {
+    using Command = Mirror.CommandAttribute;
+}
+namespace A {
+    using Command = Other.CommandAttribute;
+    class Victim : Mirror.NetworkBehaviour { [Command] void CmdMove() {} }
+}
+`);
+      expect(reversed).toEqual({ nodes: [], references: [] });
     });
 
     it('opens the gate on a fully-qualified Mirror.NetworkBehaviour base without a using', () => {

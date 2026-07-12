@@ -61,6 +61,10 @@ interface SyncVarHooksRule {
 // method attributes keep only entries with a string `attribute`.
 interface GatedStackSection {
   gate: GateConfig;
+  // Namespaces the stack's gated ATTRIBUTES live in — used to validate a qualified attribute
+  // spelling. Kept SEPARATE from the gate prefixes: FishNet's gate is `FishNet` but its RPC
+  // attributes live in `FishNet.Object`, so the two cannot be inferred from one list (BLOCKING 2 r3).
+  attributeNamespaces?: string[];
   hostInvokedBases: Record<string, HostBaseRule | string>;
   attributeEntryPoints?: { methodAttributes?: MethodAttributeRule[] };
   syncVarFields?: SyncVarFieldsRule;
@@ -159,6 +163,9 @@ interface GatedStack {
   requiredUsingRes: RegExp[];
   disqualifyUsingRes: RegExp[];
   fqBaseAlternative: string | null;
+  // Namespaces the stack's gated attributes live in (own list, not the gate prefixes) — see
+  // GatedStackSection.attributeNamespaces. Consulted ONLY by attrQualifierBelongsToStack.
+  attributeNamespaces: string[];
   hostRules: Record<string, HostBaseRule>;
   hostBases: Set<string>;
   methodAttributes: MethodAttributeRule[];
@@ -212,6 +219,7 @@ function buildGatedStack(name: string, section: GatedStackSection | undefined): 
     requiredUsingRes: (gate.requiresAnyUsingPrefix ?? []).map(usingPrefixRegex),
     disqualifyUsingRes: (gate.disqualifyingUsingPrefixes ?? []).map(usingPrefixRegex),
     fqBaseAlternative: gate.fullyQualifiedBaseAlternative ?? null,
+    attributeNamespaces: section.attributeNamespaces ?? [],
     hostRules,
     hostBases: new Set(Object.keys(hostRules)),
     methodAttributes,
@@ -478,14 +486,35 @@ function resolveBaseFull(base: string, aliases: Map<string, string>): string {
   return value;
 }
 
+// Parse C# using-alias directives (`using <Name> = <QualifiedName>;`) TOKEN-WISE from anywhere in
+// the (masked) file — same-line, multiple per line, inside namespace blocks (BLOCKING 2 r3). The
+// returned map is used only for BASE type resolution (resolveBaseFull, last-wins). Attribute
+// provenance no longer resolves alias targets; see aliasKilledAttrNames for the KILL rule.
 function parseAliases(content: string): Map<string, string> {
   const aliases = new Map<string, string>();
-  const regex = /^\s*using\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_][\w.]*)\s*;/gm;
+  const regex = /\busing\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_][\w.]*)\s*;/g;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(content)) !== null) {
     aliases.set(match[1]!, match[2]!);
   }
   return aliases;
+}
+
+function stripAttributeSuffix(name: string): string {
+  return name.endsWith('Attribute') ? name.slice(0, -'Attribute'.length) : name;
+}
+
+// Conservative KILL set for bare attribute tokens (BLOCKING 2 r3). A using-alias directive rebinds
+// a bare identifier file-wide, and C# using scope is finer than we model; rather than resolve alias
+// targets (which was line-anchored and last-wins, and fabricated rows on same-line/namespace-scoped
+// directives), we simply REJECT a bare `[Token]` whenever ANY alias in the file binds that name —
+// regardless of the alias target, INCLUDING an owning-stack target (an accepted missed edge: a
+// qualified `[Mirror.Command]` still emits). Names are normalized by stripping a trailing
+// `Attribute` so `using CommandAttribute = …` kills bare `[Command]` too.
+function aliasKilledAttrNames(aliases: Map<string, string>): Set<string> {
+  const killed = new Set<string>();
+  for (const name of aliases.keys()) killed.add(stripAttributeSuffix(name));
+  return killed;
 }
 
 // Two host descriptors are equivalent when they name the same host base and the same set of open
@@ -1026,17 +1055,18 @@ function findAttribute(attrs: AttributeUse[], name: string): AttributeUse | unde
 }
 
 // True when `qualifier` (the namespace part of a written attribute name, e.g. `Mirror` in
-// `[Mirror.Command]`) is EXACTLY one of a gated stack's own namespaces — a using prefix or the
-// namespace of its fully-qualified base. Descendant namespaces are NOT accepted (BLOCKING 2,
-// round 2): Mirror's four gated attributes live directly in namespace `Mirror`, FishNet's in
-// `FishNet.Object`, so `Mirror.Whatever.Command` / `FishNet.Whatever.ServerRpc` are foreign
-// custom types that merely share a leading segment — matching them fabricated edges.
+// `[Mirror.Command]`) is EXACTLY one of a gated stack's own ATTRIBUTE namespaces. This is the
+// stack's dedicated `attributeNamespaces` list — NOT the gate prefixes (BLOCKING 2 r3): FishNet's
+// gate is `FishNet` but its RPC attributes live in `FishNet.Object`, so `[FishNet.ServerRpc]` is a
+// foreign custom attribute and must not match. Descendant namespaces are still rejected (exact
+// match only), so `[Mirror.Whatever.Command]` / `[FishNet.Whatever.ServerRpc]` stay foreign. When a
+// stack omits the list, fall back to the fully-qualified base's namespace.
 function attrQualifierBelongsToStack(qualifier: string, stack: GatedStack): boolean {
-  const owners = [...stack.usingPrefixes];
-  if (stack.fqBaseAlternative) {
-    const ns = stack.fqBaseAlternative.split('.').slice(0, -1).join('.');
-    if (ns) owners.push(ns);
-  }
+  const owners = stack.attributeNamespaces.length
+    ? stack.attributeNamespaces
+    : stack.fqBaseAlternative
+      ? [stack.fqBaseAlternative.split('.').slice(0, -1).join('.')]
+      : [];
   return owners.some((p) => qualifier === p);
 }
 
@@ -1052,28 +1082,21 @@ function spellingIsOwningAttribute(name: string, ruleName: string, stack: GatedS
   return attrQualifierBelongsToStack(segments.slice(0, -1).join('.'), stack);
 }
 
-// Gated attribute matching (BLOCKING 3 + BLOCKING 2 r2): inspect the RAW written attribute token,
-// not the fully-normalized name (which strips every namespace and would let a foreign
+// Gated attribute matching (BLOCKING 3 + BLOCKING 2 r2/r3): inspect the RAW written attribute
+// token, not the fully-normalized name (which strips every namespace and would let a foreign
 // `[Other.Command]` masquerade as Mirror's `[Command]`). Accept a bare token (`Command`), an
 // `Attribute`-suffixed token (`CommandAttribute`), or a qualified token ONLY when the qualifier is
-// EXACTLY the owning stack's namespace. A C# using-alias shadows a bare token: when the written
-// single-identifier token is a using-alias in scope, it does NOT denote the framework attribute —
-// resolve the alias TARGET and accept only when THAT is the owning stack's own attribute (so
-// `using Command = Other.CommandAttribute; [Command]` is foreign, while `using Command =
-// Mirror.CommandAttribute; [Command]` survives). An unqualified alias target cannot prove
-// provenance and is rejected (emit-nothing).
+// EXACTLY the owning stack's attribute namespace. A bare token is additionally REJECTED whenever a
+// using-alias in the file rebinds that name (`killed`) — the conservative KILL rule; qualified
+// spellings are unaffected.
 function gatedAttributeMatches(
   rawName: string,
   ruleName: string,
   stack: GatedStack,
-  aliases: Map<string, string>
+  killed: Set<string>
 ): boolean {
   const segments = rawName.split('.');
-  if (segments.length === 1 && aliases.has(rawName)) {
-    const target = aliases.get(rawName)!;
-    if (!target.includes('.')) return false;
-    return spellingIsOwningAttribute(target, ruleName, stack);
-  }
+  if (segments.length === 1 && killed.has(stripAttributeSuffix(segments[0]!))) return false;
   return spellingIsOwningAttribute(rawName, ruleName, stack);
 }
 
@@ -1081,9 +1104,9 @@ function findGatedAttribute(
   attrs: AttributeUse[],
   ruleName: string,
   stack: GatedStack,
-  aliases: Map<string, string>
+  killed: Set<string>
 ): AttributeUse | undefined {
-  return attrs.find((a) => gatedAttributeMatches(a.rawName, ruleName, stack, aliases));
+  return attrs.find((a) => gatedAttributeMatches(a.rawName, ruleName, stack, killed));
 }
 
 function hasSerializationAttribute(attrs: AttributeUse[]): boolean {
@@ -1261,7 +1284,7 @@ function processClass(
   seenRefs: Set<string>,
   cls: ClassBlock,
   originalContent: string,
-  aliases: Map<string, string>
+  killedAttrNames: Set<string>
 ): void {
   const methods = parseMethods(cls, originalContent);
   const fields = parseFields(cls, originalContent);
@@ -1346,7 +1369,7 @@ function processClass(
       for (const method of methods) {
         if (!method.canEmit) continue;
         for (const rule of stack.methodAttributes) {
-          const attr = findGatedAttribute(method.attributes, rule.attribute, stack, aliases);
+          const attr = findGatedAttribute(method.attributes, rule.attribute, stack, killedAttrNames);
           if (!attr) continue;
           if (rule.requiresStatic && !method.isStatic) continue;
           if (rule.requiresInstance && method.isStatic) continue;
@@ -1377,7 +1400,7 @@ function processClass(
       if (!stack.hostBases.has(cls.hostBase)) continue;
       for (const field of fields) {
         if (field.isStatic) continue;
-        const attr = findGatedAttribute(field.attributes, stack.syncVarAttribute, stack, aliases);
+        const attr = findGatedAttribute(field.attributes, stack.syncVarAttribute, stack, killedAttrNames);
         if (!attr) continue;
         const fieldRefs = [`${FIELD_REF_PREFIX}${cls.name}.${field.name}`];
         const typeRef = localTypeRefName(field.typeName);
@@ -1401,7 +1424,7 @@ function processClass(
         const hookAttr =
           stack.syncVarHookAttribute === stack.syncVarAttribute
             ? attr
-            : findGatedAttribute(field.attributes, stack.syncVarHookAttribute, stack, aliases);
+            : findGatedAttribute(field.attributes, stack.syncVarHookAttribute, stack, killedAttrNames);
         if (!hookAttr) continue;
         const hookRaw = namedArgValue(hookAttr.args, stack.syncVarHookArg);
         if (hookRaw === null) continue;
@@ -1585,8 +1608,9 @@ export const unityResolver: FrameworkResolver = {
     const seenNodes = new Set<string>();
     const seenRefs = new Set<string>();
     const { classes, aliases } = parseClassBlocks(content, filePath);
+    const killedAttrNames = aliasKilledAttrNames(aliases);
     for (const cls of classes) {
-      processClass(result, seenNodes, seenRefs, cls, content, aliases);
+      processClass(result, seenNodes, seenRefs, cls, content, killedAttrNames);
     }
     return result;
   },

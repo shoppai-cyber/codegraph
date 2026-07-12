@@ -279,6 +279,8 @@
       "fullyQualifiedBaseAlternative": "FishNet.Object.NetworkBehaviour",
       "disqualifyingUsingPrefixes": ["Unity.Netcode", "Mirror", "Fusion"]
     },
+    "attributeNamespaces": ["FishNet.Object"],
+    "attributeNamespacesNote": "The namespaces FishNet's gated attributes (ServerRpc, ObserversRpc, TargetRpc, …) actually live in — used to validate a QUALIFIED attribute spelling like [FishNet.Object.ServerRpc]. Deliberately NOT the gate prefix `FishNet`: [FishNet.ServerRpc] is a custom FishNet.ServerRpcAttribute, not the framework's, so gate namespaces and attribute-owner namespaces are separate lists (BLOCKING 2 r3).",
     "hostInvokedBases": {
       "note": "NetworkBehaviour is a GATED host base (see gate) — deliberately NOT in the top-level ungated hostInvokedBases whitelist, because the bare `NetworkBehaviour` token is shared by NGO, Mirror, and FishNet. Its host-method set is the 10 public virtual FishNet lifecycle callbacks UNIONED with the full MonoBehaviour message set: FishNet's `NetworkBehaviour : MonoBehaviour` is a framework-guaranteed chain (verified in 4.6.20 source), so Update/Awake/OnTriggerEnter/etc. are engine-invoked on it too. The union is materialised by the resolver from the MonoBehaviour entry via includesMonoBehaviourMessages, so the MonoBehaviour list stays the single source of truth (no drift).",
       "NetworkBehaviour": {
@@ -345,6 +347,8 @@
       "fullyQualifiedBaseAlternative": "Mirror.NetworkBehaviour",
       "disqualifyingUsingPrefixes": ["Unity.Netcode", "FishNet", "Fusion"]
     },
+    "attributeNamespaces": ["Mirror"],
+    "attributeNamespacesNote": "The namespaces Mirror's gated attributes (Command, ClientRpc, TargetRpc, SyncVar) actually live in — used to validate a QUALIFIED attribute spelling like [Mirror.Command]. Here it coincides with the gate prefix `Mirror`, but the list is kept separate on purpose so a descendant like [Mirror.Whatever.Command] stays foreign (BLOCKING 2 r3).",
     "hostInvokedBases": {
       "note": "NetworkBehaviour is a GATED host base — the bare token is shared by NGO, FishNet, and Photon Fusion. Host-method set = the 12 framework-invoked overridable methods below UNIONED with the full MonoBehaviour message set (Mirror's `NetworkBehaviour : MonoBehaviour` is framework-guaranteed; union materialised via includesMonoBehaviourMessages).",
       "NetworkBehaviour": {
