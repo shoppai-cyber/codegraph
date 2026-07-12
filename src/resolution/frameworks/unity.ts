@@ -87,6 +87,16 @@ interface ClassBlock {
   body: string;
   rawBody: string;
   bodyOffset: number;
+  // Positions in the masked source used for nesting detection (BLOCKING 3, round 3): declIndex is
+  // the declaration start, braceOpen/braceClose the class body span. A block whose declIndex falls
+  // inside another block's [braceOpen, braceClose] is a nested class and is excluded from the
+  // top-level name map.
+  declIndex: number;
+  braceOpen: number;
+  braceClose: number;
+  // Whether the declaration carried the `partial` keyword. All-partial blocks of one name are a
+  // single compiler type and are merged in the name map rather than treated as ambiguous.
+  isPartial: boolean;
   filePath: string;
   hostBase: string | null;
   // The gated stacks whose gated rules (host callbacks, RPC/SyncVar attributes) may apply to
@@ -478,6 +488,16 @@ function parseAliases(content: string): Map<string, string> {
   return aliases;
 }
 
+// Two host descriptors are equivalent when they name the same host base and the same set of open
+// owning stacks. Used to decide whether the direct evidence carried by the separate blocks of an
+// all-partial type agrees (mergeable) or conflicts (ambiguous) — BLOCKING 3, round 3.
+function sameHostInfo(a: HostInfo, b: HostInfo): boolean {
+  if (a.hostBase !== b.hostBase) return false;
+  const an = a.applicable.map((s) => s.name).sort();
+  const bn = b.applicable.map((s) => s.name).sort();
+  return an.length === bn.length && an.every((name, i) => name === bn[i]);
+}
+
 // A base may drive same-file chain propagation only when it was written BARE in source — its full
 // form carries no dot (BLOCKING 1, round 3). A dotted base, whether spelled explicitly
 // (`Other.Root`) or alias-expanded into a foreign namespace, denotes a specific external type and
@@ -511,6 +531,7 @@ function parseClassBlocks(
     const baseTokens = splitTopLevel(match[2] || '');
     const fullBases = baseTokens.map((b) => resolveBaseFull(b, aliases));
     const bases = fullBases.map((b) => b.split('.').pop() || b);
+    const header = match[0]!.slice(0, match[0]!.indexOf('class'));
     classes.push({
       name: match[1]!,
       bases,
@@ -519,6 +540,10 @@ function parseClassBlocks(
       body: safe.slice(openBrace + 1, closeBrace),
       rawBody: noComments.slice(openBrace + 1, closeBrace),
       bodyOffset: openBrace + 1,
+      declIndex: match.index,
+      braceOpen: openBrace,
+      braceClose: closeBrace,
+      isPartial: /\bpartial\b/.test(header),
       filePath,
       hostBase: null,
       applicableStacks: [],
@@ -542,32 +567,64 @@ function parseClassBlocks(
     return null;
   };
 
-  // A bare class name is an ambiguous chain target when it is DECLARED more than once in the file
-  // (BLOCKING 1, round 2): the two declarations are distinct types living in different namespaces
-  // (`Foreign.Root : FishNet…` vs `Local.Root : Mirror…`), and the base-name chain lookup is
-  // namespace-blind — it cannot tell which `Root` a derived `: Root` meant. Conservatively refuse
-  // to install OR chain-propagate through any duplicated name (emit-nothing beats donating a
-  // foreign class an unrelated stack's ownership). Direct per-block classification is unaffected —
-  // each block is still classified from its OWN base in `resolved` below, so a directly-rooted
-  // block of a duplicated name still emits.
-  const nameCounts = new Map<string, number>();
-  for (const cls of classes) nameCounts.set(cls.name, (nameCounts.get(cls.name) ?? 0) + 1);
+  // Nested classes never participate in the top-level name map — neither as a chain donor nor as
+  // an ambiguity trigger (BLOCKING 3, round 3). A class whose declaration sits inside another
+  // class's body is scoped to that outer class; a top-level `: Root` can never denote it. Detected
+  // by brace span: the declaration index falls inside another block's [braceOpen, braceClose].
+  const topLevelClasses = classes.filter(
+    (cls) => !classes.some((o) => o !== cls && o.braceOpen < cls.declIndex && cls.declIndex < o.braceClose)
+  );
 
+  // Group top-level blocks by simple name to decide chain-target identity. A name is an AMBIGUOUS
+  // chain target — refuse to install or propagate through it — only when it is genuinely ambiguous:
+  //   * Multiple NON-partial blocks of one name are distinct types in different namespaces
+  //     (`Foreign.Root : FishNet…` vs `Local.Root : Mirror…`); the base-name chain lookup is
+  //     namespace-blind, so emit-nothing beats donating an unrelated stack's ownership (round 2).
+  //   * All-partial blocks of one name are a SINGLE compiler type (BLOCKING 3): merge them and
+  //     install the HostInfo from whichever block carries direct base evidence. Only CONFLICTING
+  //     direct evidence across the partial blocks is ambiguous.
+  // Direct per-block classification is unaffected — each block is still classified from its OWN
+  // base in `resolved` below (a base-less partial block is not a host), so a directly-rooted block
+  // of a duplicated name still emits its own rows.
+  const blocksByName = new Map<string, ClassBlock[]>();
+  for (const cls of topLevelClasses) {
+    const list = blocksByName.get(cls.name);
+    if (list) list.push(cls);
+    else blocksByName.set(cls.name, [cls]);
+  }
+
+  const ambiguousNames = new Set<string>();
   // Name → direct HostInfo, the lookup target when another class in the same file names it as a
   // base. The whole descriptor propagates, so a same-file chain inherits its root's owning stacks.
   const directHostByName = new Map<string, HostInfo>();
-  for (const cls of classes) {
-    if ((nameCounts.get(cls.name) ?? 0) > 1) continue;
-    const info = directInfoFor(cls);
-    if (info) directHostByName.set(cls.name, info);
+  for (const [name, blocks] of blocksByName) {
+    if (blocks.length === 1) {
+      const info = directInfoFor(blocks[0]!);
+      if (info) directHostByName.set(name, info);
+      continue;
+    }
+    if (!blocks.every((b) => b.isPartial)) {
+      ambiguousNames.add(name);
+      continue;
+    }
+    let merged: HostInfo | null = null;
+    let conflict = false;
+    for (const b of blocks) {
+      const info = directInfoFor(b);
+      if (!info) continue;
+      if (!merged) merged = info;
+      else if (!sameHostInfo(merged, info)) conflict = true;
+    }
+    if (conflict) ambiguousNames.add(name);
+    else if (merged) directHostByName.set(name, merged);
   }
 
   let changed = true;
   while (changed) {
     changed = false;
-    for (const cls of classes) {
+    for (const cls of topLevelClasses) {
       if (directHostByName.has(cls.name)) continue;
-      if ((nameCounts.get(cls.name) ?? 0) > 1) continue;
+      if (ambiguousNames.has(cls.name)) continue;
       const inheritedBase = chainableBase(cls, directHostByName);
       if (inheritedBase) {
         directHostByName.set(cls.name, directHostByName.get(inheritedBase)!);

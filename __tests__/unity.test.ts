@@ -1899,6 +1899,80 @@ class Child : Root {
       );
     });
 
+    // --- BLOCKING 3 (round 3): the duplicate-name guard must not swallow partial / nested classes ---
+
+    it('chains through an all-partial base type (one compiler type, not ambiguous)', () => {
+      const result = extract(`
+using Mirror;
+partial class Root : NetworkBehaviour {}
+partial class Root {}
+class Child : Root {
+    public void OnStartServer() {}
+    [Command] void M() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.M',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.M',
+        ].sort()
+      );
+    });
+
+    it('chains through a top-level base whose name is only shadowed by a nested class', () => {
+      const result = extract(`
+using Mirror;
+class Root : NetworkBehaviour {}
+class Outer { class Root {} }
+class Child : Root {
+    public void OnStartServer() {}
+    [Command] void M() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.M',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.M',
+        ].sort()
+      );
+    });
+
+    it('does not let a same-named struct trip the class-name ambiguity guard', () => {
+      const result = extract(`
+using Mirror;
+class Root : NetworkBehaviour {}
+class Child : Root {
+    public void OnStartServer() {}
+    [Command] void M() {}
+}
+struct Root { int x; }
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.M',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.M',
+        ].sort()
+      );
+    });
+
     // --- SyncVar field liveness ---
 
     it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {
