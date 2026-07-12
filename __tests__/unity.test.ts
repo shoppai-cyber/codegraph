@@ -2409,6 +2409,41 @@ class Player : NetworkBehaviour
       expect(result).toEqual({ nodes: [], references: [] });
     });
 
+    // --- Member-scan catastrophic backtracking (BLOCKING 7) ---
+
+    it('does not hang on a method preceded by many stacked attributes (BLOCKING 7)', () => {
+      // Mirrors the real trigger: a block-bodied method under ~30 stacked [TestCase(...)] lines
+      // (CRLF + tabs). The block body means the expression-bodied regex's `=>` tail never matches,
+      // forcing the full backtrack that the double-sided `\s*` attribute run blew up on (2^N).
+      const attrs = Array.from(
+        { length: 30 },
+        (_, i) => `\t[TestCase("a${i}", "=", "1", 1)]`
+      ).join('\r\n');
+      const source =
+        `using Mirror;\r\n\r\nclass Player : NetworkBehaviour\r\n{\r\n${attrs}\r\n` +
+        `\tpublic void Foo()\r\n\t{\r\n\t\tint x = 1;\r\n\t}\r\n}\r\n`;
+      const start = Date.now();
+      const result = extract(source);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(500);
+      // None of the stacked attributes are gated and Foo is not a host callback, so nothing emits —
+      // the point is that extract() COMPLETES.
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still extracts an RPC method carrying many stacked attributes (BLOCKING 7)', () => {
+      // The single-sided attribute run must still capture the whole stack into group 1, so the
+      // gated [Command] below ~30 [TestCase] lines is found and emitted.
+      const attrs = Array.from({ length: 30 }, (_, i) => `\t[TestCase("a${i}")]`).join('\r\n');
+      const source =
+        `using Mirror;\r\n\r\nclass Player : NetworkBehaviour\r\n{\r\n${attrs}\r\n` +
+        `\t[Command]\r\n\tvoid CmdMove()\r\n\t{\r\n\t}\r\n}\r\n`;
+      const start = Date.now();
+      const result = extract(source);
+      expect(Date.now() - start).toBeLessThan(500);
+      expect(nodeNames(result)).toContain('UNITY attribute Command Player.CmdMove');
+    });
+
     // --- SyncVar hook resolution ---
 
     it('resolves a [SyncVar(hook = nameof(Method))] hook to a unique same-class method', () => {

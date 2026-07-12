@@ -377,7 +377,7 @@ function parseAttributes(text: string): AttributeUse[] {
 
 function leadingAttributes(content: string, index: number): AttributeUse[] {
   const prefix = content.slice(Math.max(0, index - 1000), index);
-  const match = /((?:[ \t]*\[[^\]]+\][ \t]*(?:\r?\n)?)+)[ \t]*$/.exec(prefix);
+  const match = /((?:\[[^\]]+\][ \t]*(?:\r?\n[ \t]*)?)+)[ \t]*$/.exec(prefix);
   return match ? parseAttributes(match[1]!) : [];
 }
 
@@ -681,7 +681,13 @@ function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
   // line (SHOULD-FIX 4) can't trigger the quadratic per-position rescan this pattern otherwise
   // does — 512 chars is far beyond any real signature's return type. Same bound on the
   // expression-bodied and no-body declaration regexes below.
-  const methodRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{/g;
+  // The leading attribute run is `(?:\[..\]\s*)*` with a SINGLE trailing `\s*` per iteration — NOT
+  // `(?:\s*\[..\]\s*)*`. A `\s*` on both sides of the repeated bracket makes the whitespace between
+  // adjacent attributes split ambiguously, so a method with N stacked attributes whose tail then
+  // fails to match (e.g. a block body against the `=>` expression regex) backtracks 2^N ways and
+  // hangs (BLOCKING 7). Single-sided is unambiguous; the run still captures every attribute into
+  // group 1. Same shape on the property regex below.
+  const methodRegex = /((?:\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{/g;
   let match: RegExpExecArray | null;
   while ((match = methodRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
@@ -701,7 +707,7 @@ function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
     });
   }
 
-  const expressionRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*=>[^;{}]*;/g;
+  const expressionRegex = /((?:\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*=>[^;{}]*;/g;
   while ((match = expressionRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
     const header = match[0]!;
@@ -717,7 +723,7 @@ function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
     });
   }
 
-  const declarationRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern|abstract)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;/g;
+  const declarationRegex = /((?:\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern|abstract)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;/g;
   while ((match = declarationRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
     const header = match[0]!;
@@ -932,7 +938,7 @@ function parseFields(cls: ClassBlock, originalContent: string): MemberDecl[] {
 
 function parseProperties(cls: ClassBlock, originalContent: string): MemberDecl[] {
   const properties: MemberDecl[] = [];
-  const propRegex = /((?:\s*\[[^\]]+\]\s*)+)\s*(?:(?:public|private|protected|internal|static|new)\s+)*([A-Za-z_][\w.<>]*)\s+([A-Za-z_]\w*)\s*\{/g;
+  const propRegex = /((?:\[[^\]]+\]\s*)+)(?:(?:public|private|protected|internal|static|new)\s+)*([A-Za-z_][\w.<>]*)\s+([A-Za-z_]\w*)\s*\{/g;
   let match: RegExpExecArray | null;
   while ((match = propRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
