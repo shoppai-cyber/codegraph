@@ -174,7 +174,10 @@ class Player : BaseBehaviour
       expect(crossFile).toEqual({ nodes: [], references: [] });
     });
 
-    it('treats each partial class block independently', () => {
+    it('classifies members of a base-less sibling partial block via the merged type (SHOULD-FIX 1, round 4)', () => {
+      // The two blocks are ONE compiler type (same name, same namespace, both partial); the base-less
+      // block's Update() belongs to the MonoBehaviour-derived Player and must be live. The old
+      // behavior lost it by classifying each block only from its own bases.
       const result = extract(`
 using UnityEngine;
 
@@ -187,7 +190,8 @@ partial class Player
     void Update() {}
 }
 `);
-      expect(result).toEqual({ nodes: [], references: [] });
+      expect(nodeNames(result)).toEqual(['UNITY MonoBehaviour.Update Player.Update']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.Update']);
     });
 
     it('emits ScriptableObject lifecycle and CreateAssetMenu class liveness', () => {
@@ -2055,27 +2059,173 @@ class Child : Root {
       );
     });
 
-    it('does not let a same-named struct trip the class-name ambiguity guard', () => {
+    it('poisons the bare-name chain when a same-named struct competes in another namespace (BLOCKING 2, round 4)', () => {
+      // `Plain.Child : Root` binds to `Plain.Root` (the struct), not `Networked.Root`. Our base-name
+      // lookup is namespace-blind, so a same-simple-name non-class declaration must poison the chain
+      // rather than donate the networked class's ownership. Emit nothing (the missed edge is safe).
       const result = extract(`
 using Mirror;
-class Root : NetworkBehaviour {}
-class Child : Root {
+namespace Networked { class Root : NetworkBehaviour {} }
+namespace Plain {
+    struct Root { int x; }
+    class Child : Root {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- Round 5: fabrication fixes (emit nothing on uncertain type identity) ---
+
+    it('does not merge two same-named partial types across namespaces (BLOCKING 1, round 4)', () => {
+      // `Plain.Root` (base-less partial) is a DIFFERENT compiler type from `Networked.Root`; merging
+      // them by simple name fabricates Mirror ownership for `Plain.Child : Root`. Poison, emit nothing.
+      const result = extract(`
+using Mirror;
+namespace Networked { partial class Root : NetworkBehaviour {} }
+namespace Plain {
+    partial class Root {}
+    class Child : Root {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('poisons the chain when a same-named interface competes in another namespace (BLOCKING 2, round 4)', () => {
+      const result = extract(`
+using Mirror;
+namespace Networked { class Root : NetworkBehaviour {} }
+namespace Plain {
+    interface Root {}
+    class Child : Root {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('kills a bare [Command] whose alias target is global::-qualified (BLOCKING 3, round 4)', () => {
+      // `using Command = global::Other.CommandAttribute;` rebinds the bare token; the KILL set keys on
+      // the alias LHS only, so a global::/extern-qualified target no longer leaks a false Mirror row.
+      const result = extract(`
+using Mirror;
+using Command = global::Other.CommandAttribute;
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('kills a bare [Command] whose alias target is extern-alias-qualified (BLOCKING 3, round 4)', () => {
+      const result = extract(`
+using Mirror;
+using Command = Vendor::Other.CommandAttribute;
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not resolve a base alias with two distinct namespace-scoped bindings (BLOCKING 4, round 4)', () => {
+      // `A.Victim : NB` derives from `Other.Base`; the later `namespace B { using NB = Mirror… }` is
+      // out of scope. The file-global map must NOT last-wins `NB` to Mirror. Ambiguous -> unresolved.
+      const result = extract(`
+using Mirror;
+namespace A {
+    using NB = Other.Base;
+    class Victim : NB {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+namespace B { using NB = Mirror.NetworkBehaviour; }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a bare gated host token the file locally redeclares (BLOCKING 5, round 4)', () => {
+      // `class NetworkBehaviour {}` in the file means bare `: NetworkBehaviour` binds to the local
+      // type, not Mirror's base. Emit nothing rather than fabricate a host.
+      const result = extract(`
+using Mirror;
+namespace Game {
+    class NetworkBehaviour {}
+    class P : NetworkBehaviour {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a bare [Command] the file locally redeclares, but keeps a real host callback (BLOCKING 5, round 4)', () => {
+      // `class CommandAttribute {}` shadows `[Command]` (killed), while the class is still a real
+      // Mirror host, so its OnStartServer callback stays live — the kill is surgical, not blanket.
+      const result = extract(`
+using System;
+using Mirror;
+namespace Game {
+    class CommandAttribute : Attribute {}
+    class P : NetworkBehaviour {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer P.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:P.OnStartServer']);
+    });
+
+    it('honors a mid-line FishNet disqualifier on a shared using line (SHOULD-FIX 3, round 4)', () => {
+      // `using Mirror; using FishNet.Object;` on ONE physical line: the FishNet exclusion must still
+      // win, so no Mirror rows emit. Token-wise gate recognition, not physical-line anchoring.
+      const result = extract(`
+using Mirror; using FishNet.Object;
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- Round 5: safe-direction fixes (must still emit) ---
+
+    it('opens the Mirror gate on a `global using` directive (SHOULD-FIX 3, round 4)', () => {
+      const result = extract(`
+global using Mirror;
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command P.M']);
+      expect(refPairs(result)).toEqual(['references:unity:method:P.M']);
+    });
+
+    it('keeps a [SyncVar] field whose initializer uses the left-shift operator (SHOULD-FIX 2, round 4)', () => {
+      const result = extract(`
+using Mirror;
+class P : NetworkBehaviour { [SyncVar] int x = a << 2; }
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field P.x']);
+      expect(refPairs(result)).toEqual(['references:unity:field:P.x']);
+    });
+
+    it('classifies members of a base-less sibling partial block for a Mirror host (SHOULD-FIX 1, round 4)', () => {
+      const result = extract(`
+using Mirror;
+partial class P : NetworkBehaviour {}
+partial class P {
     public void OnStartServer() {}
     [Command] void M() {}
 }
-struct Root { int x; }
 `);
       expect(nodeNames(result)).toEqual(
-        [
-          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
-          'UNITY attribute Command Child.M',
-        ].sort()
+        ['UNITY NetworkBehaviour.OnStartServer P.OnStartServer', 'UNITY attribute Command P.M'].sort()
       );
       expect(refPairs(result)).toEqual(
-        [
-          'references:unity:host:Child.OnStartServer',
-          'references:unity:method:Child.M',
-        ].sort()
+        ['references:unity:host:P.OnStartServer', 'references:unity:method:P.M'].sort()
       );
     });
 

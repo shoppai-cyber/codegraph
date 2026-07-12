@@ -183,11 +183,16 @@ function escapeRegExp(text: string): string {
 }
 
 function usingPrefixRegex(prefix: string): RegExp {
-  // Matches a real `using [static] <prefix>;` or `using [static] <prefix>.<sub>;` namespace
-  // import. The post-prefix token is constrained to `.` (sub-namespace) or `;` (exact import)
-  // so that a longer identifier (`MirrorSharp`) and an ALIAS directive (`using Mirror = X;`,
-  // whose next token is `=`) are both rejected — only real namespace imports count (F3).
-  return new RegExp(`^\\s*using\\s+(?:static\\s+)?${escapeRegExp(prefix)}(?:\\.|\\s*;)`, 'm');
+  // Matches a real `using`/`global using`/`using static` namespace import for <prefix>, recognized
+  // TOKEN-WISE rather than at physical line start (SHOULD-FIX 3, round 4). `\busing` (not the old
+  // `^\s*using` with the `m` flag) so a second import on the same line (`using System; using
+  // Mirror;`), a `global using Mirror;` (the boundary before `using` still holds), and a
+  // `using static Mirror.Tools;` all register — the gate/exclusion contract is per-directive, not
+  // per-physical-line, and a mid-line competitor `using` must still fire an exclusion. The
+  // post-prefix token is still constrained to `.` (sub-namespace) or `;` (exact import) so that a
+  // longer identifier (`MirrorSharp`) and an ALIAS directive (`using Mirror = X;`, whose next token
+  // is `=`) are both rejected — only real namespace imports count (F3).
+  return new RegExp(`\\busing\\s+(?:static\\s+)?${escapeRegExp(prefix)}(?:\\.|\\s*;)`);
 }
 
 // Loader (decision 3 / F4): only object values carrying a string[] `hostInvokedMethods`
@@ -263,8 +268,13 @@ interface HostInfo {
  *    `MyStuff.NetworkBehaviour` whose last segment merely collides emits nothing — BLOCKING 1);
  *    a BARE token applies to every open stack that owns it. `applicable` is the surviving
  *    open owners; an empty result means "not a host here" (null).
+ *  - A BARE gated token the file LOCALLY REDECLARES (`shadowed`) is suppressed (BLOCKING 5, round
+ *    4): `class NetworkBehaviour {}` in the file means a bare `: NetworkBehaviour` binds to that
+ *    local type, not the framework base, so emitting a host row would fabricate. A DOTTED owning FQ
+ *    base (`Mirror.NetworkBehaviour`) is fully qualified and cannot be shadowed by a local simple
+ *    name, so the shadow check applies to the bare branch only.
  */
-function classifyHost(fullBase: string, openStacks: GatedStack[]): HostInfo | null {
+function classifyHost(fullBase: string, openStacks: GatedStack[], shadowed: Set<string>): HostInfo | null {
   const short = fullBase.split('.').pop() || fullBase;
   if (HOST_BASES.has(short)) return { hostBase: short, applicable: [] };
   if (GATED_HOST_TOKENS.has(short)) {
@@ -272,6 +282,7 @@ function classifyHost(fullBase: string, openStacks: GatedStack[]): HostInfo | nu
       const owners = openStacks.filter((s) => s.fqBaseAlternative === fullBase);
       return owners.length ? { hostBase: short, applicable: owners } : null;
     }
+    if (shadowed.has(short)) return null;
     const applicable = openStacks.filter((s) => s.hostBases.has(short));
     return applicable.length ? { hostBase: short, applicable } : null;
   }
@@ -486,34 +497,114 @@ function resolveBaseFull(base: string, aliases: Map<string, string>): string {
   return value;
 }
 
-// Parse C# using-alias directives (`using <Name> = <QualifiedName>;`) TOKEN-WISE from anywhere in
-// the (masked) file — same-line, multiple per line, inside namespace blocks (BLOCKING 2 r3). The
-// returned map is used only for BASE type resolution (resolveBaseFull, last-wins). Attribute
-// provenance no longer resolves alias targets; see aliasKilledAttrNames for the KILL rule.
+// Parse C# using-alias directives (`using <Name> = <target>;`) TOKEN-WISE from anywhere in the
+// (masked) file — same-line, multiple per line, inside namespace blocks (BLOCKING 2 r3). The
+// returned map is used only for BASE type resolution (resolveBaseFull). Attribute provenance no
+// longer resolves alias targets; see aliasBoundNames for the KILL rule.
+//
+// A base alias is resolvable ONLY when the name has EXACTLY ONE distinct binding across the whole
+// file AND that single target is a plain dotted identifier we can expand. Two or more distinct
+// bindings for one simple name are namespace-scoped aliases with NO file-global last-wins meaning
+// (BLOCKING 4, round 4): the old last-wins map let a later `namespace B { using NB = Mirror.Network‐
+// Behaviour; }` fabricate an owning base for a `namespace A { using NB = Other.Base; }` class. When
+// a token is ambiguous we leave it UNRESOLVED so the class using it is never falsely rooted (the
+// complementary missed edge is acceptable). A non-dotted target (`global::…`, extern `::`, generic)
+// is likewise left unresolved here (safe); the KILL set still fires on it via aliasBoundNames.
 function parseAliases(content: string): Map<string, string> {
-  const aliases = new Map<string, string>();
-  const regex = /\busing\s+([A-Za-z_]\w*)\s*=\s*([A-Za-z_][\w.]*)\s*;/g;
+  const bindings = new Map<string, Set<string>>();
+  const regex = /\busing\s+([A-Za-z_]\w*)\s*=\s*([^;]+?)\s*;/g;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(content)) !== null) {
-    aliases.set(match[1]!, match[2]!);
+    const name = match[1]!;
+    const target = match[2]!.replace(/\s+/g, '');
+    let set = bindings.get(name);
+    if (!set) {
+      set = new Set<string>();
+      bindings.set(name, set);
+    }
+    set.add(target);
+  }
+  const aliases = new Map<string, string>();
+  for (const [name, targets] of bindings) {
+    if (targets.size !== 1) continue; // ambiguous namespace-scoped alias — leave unresolved
+    const target = [...targets][0]!;
+    if (/^[A-Za-z_][\w.]*$/.test(target)) aliases.set(name, target);
   }
   return aliases;
+}
+
+// Every simple name bound by a `using <Name> = …;` alias directive anywhere in the file, regardless
+// of the target shape (`global::`, extern `::`, dotted, generic — the LHS is all the KILL rule
+// needs). Feeds the conservative attribute KILL set (BLOCKING 3, round 4): the base-resolution map
+// above deliberately drops `global::`/ambiguous targets, so it can no longer be the KILL source
+// without re-leaking a bare `[Command]` whose alias target was `global::Other.CommandAttribute`.
+function aliasBoundNames(content: string): Set<string> {
+  const names = new Set<string>();
+  const regex = /\busing\s+([A-Za-z_]\w*)\s*=/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) names.add(match[1]!);
+  return names;
+}
+
+// Simple names of every top-level type declared IN this file that is NOT a class (interface, struct,
+// enum, record). Used two ways (round 4): (a) BLOCKING 2 — a same-simple-name non-class declaration
+// competes with a networked class as a base-list target under C#'s namespace-scoped name resolution,
+// which our bare-name chain can't model, so its presence poisons that name's chain; (b) BLOCKING 5 —
+// together with class names it forms the local-shadow set that suppresses a bare gated token the
+// file locally redeclares. Nesting is not excluded on purpose: an over-broad poison/kill is only
+// ever a missed edge (the safe direction), never a fabrication.
+function collectNonClassTypeNames(safe: string): Set<string> {
+  const names = new Set<string>();
+  const regex = /\b(?:interface|struct|enum|record(?:\s+(?:class|struct))?)\s+([A-Za-z_]\w*)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(safe)) !== null) names.add(match[1]!);
+  return names;
+}
+
+// Enclosing-namespace label for a source offset, used only to decide whether two same-named partial
+// blocks are ONE compiler type (BLOCKING 1, round 4). Handles block-scoped `namespace A.B { … }`
+// (brace span) and file-scoped `namespace A.B;` (to EOF); nested namespaces concatenate outer→inner.
+// A declaration outside any namespace yields '' (the global namespace). Two partial blocks merge
+// only when their labels are byte-equal, so partials in different namespaces stay distinct.
+function namespaceSpans(safe: string): Array<{ name: string; start: number; end: number }> {
+  const spans: Array<{ name: string; start: number; end: number }> = [];
+  const regex = /\bnamespace\s+([A-Za-z_][\w.]*)\s*([{;])/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(safe)) !== null) {
+    if (match[2] === '{') {
+      const open = safe.indexOf('{', match.index);
+      const close = open === -1 ? -1 : findMatchingBrace(safe, open);
+      spans.push({ name: match[1]!, start: match.index, end: close === -1 ? safe.length : close });
+    } else {
+      spans.push({ name: match[1]!, start: match.index, end: safe.length });
+    }
+  }
+  return spans;
+}
+
+function namespaceLabelAt(spans: Array<{ name: string; start: number; end: number }>, index: number): string {
+  return spans
+    .filter((s) => s.start <= index && index <= s.end)
+    .sort((a, b) => a.start - b.start)
+    .map((s) => s.name)
+    .join('.');
 }
 
 function stripAttributeSuffix(name: string): string {
   return name.endsWith('Attribute') ? name.slice(0, -'Attribute'.length) : name;
 }
 
-// Conservative KILL set for bare attribute tokens (BLOCKING 2 r3). A using-alias directive rebinds
-// a bare identifier file-wide, and C# using scope is finer than we model; rather than resolve alias
-// targets (which was line-anchored and last-wins, and fabricated rows on same-line/namespace-scoped
-// directives), we simply REJECT a bare `[Token]` whenever ANY alias in the file binds that name —
-// regardless of the alias target, INCLUDING an owning-stack target (an accepted missed edge: a
-// qualified `[Mirror.Command]` still emits). Names are normalized by stripping a trailing
-// `Attribute` so `using CommandAttribute = …` kills bare `[Command]` too.
-function aliasKilledAttrNames(aliases: Map<string, string>): Set<string> {
+// Conservative KILL set for bare attribute tokens. A bare `[Token]` is REJECTED whenever the file
+// either binds that name with a using-alias (regardless of target — BLOCKING 3 r4) or locally
+// declares a type of that name (BLOCKING 5 r4). Both are cases where C#'s own name resolution would
+// bind the bare token to something OTHER than the framework attribute, so emitting a gated row would
+// be a fabrication; a qualified `[Mirror.Command]` is unaffected. Names are normalized by stripping
+// a trailing `Attribute` so `using CommandAttribute = …` / `class CommandAttribute {}` kill bare
+// `[Command]` too. The complementary missed edge (a real `[Command]` also suppressed) is acceptable.
+function buildKilledAttrNames(aliasBound: Set<string>, localTypeNames: Set<string>): Set<string> {
   const killed = new Set<string>();
-  for (const name of aliases.keys()) killed.add(stripAttributeSuffix(name));
+  for (const name of aliasBound) killed.add(stripAttributeSuffix(name));
+  for (const name of localTypeNames) killed.add(stripAttributeSuffix(name));
   return killed;
 }
 
@@ -545,7 +636,7 @@ function chainableBase(cls: ClassBlock, byName: Map<string, HostInfo>): string |
 function parseClassBlocks(
   content: string,
   filePath: string
-): { classes: ClassBlock[]; openStacks: GatedStack[]; aliases: Map<string, string> } {
+): { classes: ClassBlock[]; openStacks: GatedStack[]; killedAttrNames: Set<string> } {
   const noComments = stripCommentsForRegex(content, 'csharp');
   const safe = maskStringLiterals(noComments);
   const aliases = parseAliases(safe);
@@ -583,14 +674,25 @@ function parseClassBlocks(
   // against real base clauses. Exclusion is still pre-parse (inside openStacksFor).
   const openStacks = openStacksFor(safe, classes);
 
+  // Every type NAME declared in this file (classes + interfaces/structs/enums/records). Two uses:
+  //  - LOCAL SHADOW (BLOCKING 5): a bare gated token the file redeclares binds to the local type,
+  //    so classifyHost suppresses the host and the attribute KILL set suppresses the bare attribute.
+  //  - COMPETITION (BLOCKING 2): a same-simple-name non-class declaration makes a bare base token
+  //    ambiguous under C#'s namespace-scoped resolution (see the name loop below).
+  const nonClassTypeNames = collectNonClassTypeNames(safe);
+  const localTypeNames = new Set<string>(nonClassTypeNames);
+  for (const cls of classes) localTypeNames.add(cls.name);
+  const killedAttrNames = buildKilledAttrNames(aliasBoundNames(safe), localTypeNames);
+
   // Direct host classification from a class's OWN resolved bases. fullBases carries the dotted
   // form so classifyHost distinguishes a foreign FQ token from an owning stack's FQ alternative
   // (BLOCKING 1); the returned HostInfo carries the open owning stacks so FQ ownership can
-  // propagate (BLOCKING 2). Evaluated per-block (not read back from the name map) so partial
-  // class blocks sharing a name stay independent — a base-less partial block is not a host.
+  // propagate (BLOCKING 2). `localTypeNames` shadows a bare gated token the file redeclares
+  // (BLOCKING 5). Evaluated per-block (not read back from the name map) so partial class blocks
+  // sharing a name stay independent — a base-less partial block is not a host.
   const directInfoFor = (cls: ClassBlock): HostInfo | null => {
     for (const full of cls.fullBases) {
-      const info = classifyHost(full, openStacks);
+      const info = classifyHost(full, openStacks, localTypeNames);
       if (info) return info;
     }
     return null;
@@ -603,18 +705,28 @@ function parseClassBlocks(
   const topLevelClasses = classes.filter(
     (cls) => !classes.some((o) => o !== cls && o.braceOpen < cls.declIndex && cls.declIndex < o.braceClose)
   );
+  const topLevelSet = new Set(topLevelClasses);
+
+  // Enclosing-namespace label per top-level block — the identity check for partial merging below.
+  const nsSpans = namespaceSpans(safe);
+  const nsLabelOf = new Map<ClassBlock, string>();
+  for (const cls of topLevelClasses) nsLabelOf.set(cls, namespaceLabelAt(nsSpans, cls.declIndex));
 
   // Group top-level blocks by simple name to decide chain-target identity. A name is an AMBIGUOUS
-  // chain target — refuse to install or propagate through it — only when it is genuinely ambiguous:
-  //   * Multiple NON-partial blocks of one name are distinct types in different namespaces
-  //     (`Foreign.Root : FishNet…` vs `Local.Root : Mirror…`); the base-name chain lookup is
-  //     namespace-blind, so emit-nothing beats donating an unrelated stack's ownership (round 2).
-  //   * All-partial blocks of one name are a SINGLE compiler type (BLOCKING 3): merge them and
-  //     install the HostInfo from whichever block carries direct base evidence. Only CONFLICTING
-  //     direct evidence across the partial blocks is ambiguous.
+  // chain target — refuse to install or propagate through it — whenever a bare `: Name` base token
+  // cannot be resolved to ONE local type with confidence:
+  //   * A same-simple-name NON-CLASS type (interface/struct/enum/record) competes as a base-list
+  //     target C# would resolve by namespace scope; our lookup is namespace-blind, so poison it
+  //     (BLOCKING 2, round 4).
+  //   * Multiple NON-partial class blocks of one name are distinct types in different namespaces;
+  //     emit-nothing beats donating an unrelated stack's ownership (round 2).
+  //   * All-partial class blocks of one name are a SINGLE compiler type ONLY when they share a
+  //     namespace (BLOCKING 1, round 4): two one-part partial `Root`s in different namespaces are
+  //     unrelated types, so a differing namespace label poisons the name. Same-namespace partials
+  //     merge, installing the HostInfo from whichever block carries direct base evidence; only
+  //     CONFLICTING direct evidence across those blocks is ambiguous.
   // Direct per-block classification is unaffected — each block is still classified from its OWN
-  // base in `resolved` below (a base-less partial block is not a host), so a directly-rooted block
-  // of a duplicated name still emits its own rows.
+  // base in `resolved` below, so a directly-rooted block of a duplicated name still emits its rows.
   const blocksByName = new Map<string, ClassBlock[]>();
   for (const cls of topLevelClasses) {
     const list = blocksByName.get(cls.name);
@@ -627,12 +739,21 @@ function parseClassBlocks(
   // base. The whole descriptor propagates, so a same-file chain inherits its root's owning stacks.
   const directHostByName = new Map<string, HostInfo>();
   for (const [name, blocks] of blocksByName) {
+    if (nonClassTypeNames.has(name)) {
+      ambiguousNames.add(name);
+      continue;
+    }
     if (blocks.length === 1) {
       const info = directInfoFor(blocks[0]!);
       if (info) directHostByName.set(name, info);
       continue;
     }
     if (!blocks.every((b) => b.isPartial)) {
+      ambiguousNames.add(name);
+      continue;
+    }
+    const labels = new Set(blocks.map((b) => nsLabelOf.get(b) ?? ''));
+    if (labels.size !== 1) {
       ambiguousNames.add(name);
       continue;
     }
@@ -665,14 +786,21 @@ function parseClassBlocks(
   const resolved = classes.map((cls) => {
     const direct = directInfoFor(cls);
     const chainedBase = chainableBase(cls, directHostByName);
-    const info = direct ?? (chainedBase ? directHostByName.get(chainedBase)! : null);
+    let info = direct ?? (chainedBase ? directHostByName.get(chainedBase)! : null);
+    // SHOULD-FIX 1 (round 4): a base-less block of a merged all-partial type carries no base of its
+    // own and has no base token to chain FROM, so its members would be lost. Inherit the descriptor
+    // installed for the (same-namespace, all-partial, non-ambiguous) name. Gated to top-level blocks
+    // so a nested partial can never read a same-named top-level type's ownership.
+    if (!info && cls.isPartial && topLevelSet.has(cls) && !ambiguousNames.has(cls.name)) {
+      info = directHostByName.get(cls.name) ?? null;
+    }
     return {
       ...cls,
       hostBase: info ? info.hostBase : null,
       applicableStacks: info ? info.applicable : [],
     };
   });
-  return { classes: resolved, openStacks, aliases };
+  return { classes: resolved, openStacks, killedAttrNames };
 }
 
 function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
@@ -872,6 +1000,14 @@ function scanFieldDeclaration(body: string, from: number): FieldScan | null {
         const ch = body[i]!;
         if (ch === '(' || ch === '[' || ch === '{') depth++;
         else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
+        // `<<` is the left-shift operator, never a generic opener (SHOULD-FIX 2, round 4). Without
+        // this guard the first `<` opens angle depth (prev is an identifier char in `a << 2`), the
+        // second `<` doesn't, nothing closes it, and the whole declaration bails at its `;` — losing
+        // a valid `[SyncVar] int x = a << 2;`. Consume both `<` and leave depth untouched. Right
+        // shift `>>`/`>>>` needs no guard: those `>` only decrement when an angle context is already
+        // open, and a top-level shift runs at angle 0, so a genuine `Dictionary<int,List<int>>`'s
+        // `>>` still closes two levels correctly.
+        else if (ch === '<' && body[i + 1] === '<') i++;
         else if (ch === '<' && (isIdentPart(prev) || prev === '>')) angle++;
         else if (ch === '>' && angle > 0) angle--;
         else if (depth === 0) {
@@ -1613,8 +1749,7 @@ export const unityResolver: FrameworkResolver = {
     const result: FrameworkExtractionResult = { nodes: [], references: [] };
     const seenNodes = new Set<string>();
     const seenRefs = new Set<string>();
-    const { classes, aliases } = parseClassBlocks(content, filePath);
-    const killedAttrNames = aliasKilledAttrNames(aliases);
+    const { classes, killedAttrNames } = parseClassBlocks(content, filePath);
     for (const cls of classes) {
       processClass(result, seenNodes, seenRefs, cls, content, killedAttrNames);
     }
