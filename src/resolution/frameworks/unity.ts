@@ -43,6 +43,13 @@ interface SyncVarFieldsRule {
   attribute: string;
 }
 
+// Hook liveness is DELIBERATELY COUPLED to the SyncVar field rule, not an independent channel
+// (CONSIDER 6 / round-1 #7): a hook is only ever resolved for a field that has ALREADY matched
+// `syncVarFields.attribute`, and the hook argument is read from an attribute on that same field.
+// So `syncVarHooks` without a `syncVarFields` on the same stack does nothing — it refines a field
+// match, it does not stand alone. This models every real target (Mirror/FishNet carry the hook on
+// the SyncVar attribute itself). A hook-only or separately-attributed stack is intentionally
+// unsupported; adding one means teaching the field loop to iterate hook attributes independently.
 interface SyncVarHooksRule {
   attribute: string;
   argumentName: string;
@@ -146,6 +153,10 @@ interface GatedStack {
   hostBases: Set<string>;
   methodAttributes: MethodAttributeRule[];
   syncVarAttribute: string | null;
+  // Hook fields are consumed ONLY inside the SyncVar-field match (coupled by design — see
+  // SyncVarHooksRule). syncVarHookAttribute defaults to syncVarAttribute when a stack omits a
+  // dedicated syncVarHooks.attribute; both stay null when the stack has no SyncVar field rule at
+  // all, so the hook branch is unreachable without a field match.
   syncVarHookAttribute: string | null;
   syncVarHookArg: string | null;
 }
@@ -1293,10 +1304,11 @@ function processClass(
           fieldRefs
         );
 
-        // Hook liveness reads the hook argument from the hook-bearing attribute, matched via the
-        // stack's dedicated syncVarHookAttribute (CONSIDER 7 — consumes syncVarHooks.attribute,
-        // falling back to the field attribute). For Mirror both are `SyncVar`, so the hook lives on
-        // the same attribute already found above and behavior is unchanged.
+        // Hook liveness is a refinement of THIS field match, not an independent pass (coupled by
+        // design — see SyncVarHooksRule / GatedStack.syncVarHookAttribute). It reads the hook
+        // argument from the hook-bearing attribute on the same field, matched via the stack's
+        // syncVarHookAttribute (defaults to the field attribute when no dedicated one is set). For
+        // Mirror both are `SyncVar`, so the hook lives on the attribute already found above.
         if (!stack.syncVarHookAttribute || !stack.syncVarHookArg) continue;
         const hookAttr =
           stack.syncVarHookAttribute === stack.syncVarAttribute
