@@ -1619,6 +1619,128 @@ class Player : NetworkBehaviour
       expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
     });
 
+    // --- SyncVar field type shapes (SHOULD-FIX 4) ---
+
+    it('keeps an ARRAY [SyncVar] field live (builtin element, no type ref)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int[] scores;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.scores']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.scores']);
+    });
+
+    it('references the ELEMENT type of a local-typed array [SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData[] roster;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.roster']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.roster', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('keeps a NULLABLE [SyncVar] field live', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int? health;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('references the underlying type of a local-typed nullable [SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData? data;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.data']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.data', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('keeps a GENERIC [SyncVar] field live (container is not a local type ref)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] SyncList<int> scores;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.scores']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.scores']);
+    });
+
+    it('keeps a GENERIC [SyncVar] field with a spaced multi-argument type live', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] SyncDictionary<int, string> lookup;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.lookup']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
+    it('emits one row per name for a MULTI-DECLARATOR [SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int x, y, z;
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY SyncVar field Player.x', 'UNITY SyncVar field Player.y', 'UNITY SyncVar field Player.z'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:field:Player.x',
+          'references:unity:field:Player.y',
+          'references:unity:field:Player.z',
+        ].sort()
+      );
+    });
+
+    it('emits one row per name for a MULTI-DECLARATOR [SyncVar] field with initializers', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int health = 100, shield = 50;
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY SyncVar field Player.health', 'UNITY SyncVar field Player.shield'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.health', 'references:unity:field:Player.shield'].sort()
+      );
+    });
+
     // --- SyncVar hook resolution ---
 
     it('resolves a [SyncVar(hook = nameof(Method))] hook to a unique same-class method', () => {

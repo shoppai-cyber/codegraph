@@ -606,18 +606,36 @@ function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
 
 function parseFields(cls: ClassBlock, originalContent: string): MemberDecl[] {
   const fields: MemberDecl[] = [];
-  const fieldRegex = /((?:\s*\[[^\]]+\]\s*)+)\s*(?:(?:public|private|protected|internal|static|readonly|volatile|new)\s+)*([A-Za-z_][\w.<>]*)\s+([A-Za-z_]\w*)\s*(?:=[^;]*)?;/g;
+  // A field we care about always carries an attribute block (bare fields are never emitted).
+  // Groups: (1) attribute block, (2) modifiers, (3) type, (4) declarator list.
+  // The TYPE supports a plain/dotted name, a generic argument list (`<...>`, which may carry
+  // commas and spaces), a nullable `?`, and one-or-more array ranks (`[]`, `[,]`, `[][]`). The
+  // DECLARATOR list is a comma-separated set of `name` (with an optional `= initializer`) so a
+  // multi-declarator field (`[SyncVar] int a, b, c;`) yields one MemberDecl per name. Parens are
+  // excluded from names, so a method declaration (`void Foo();`) never matches as a field.
+  const fieldRegex =
+    /((?:\s*\[[^\]]+\]\s*)+)((?:(?:public|private|protected|internal|static|readonly|volatile|new|const)\s+)*)([A-Za-z_][\w.]*(?:\s*<[^;{}]*>)?\s*\??(?:\s*\[[\s,]*\])*)\s+([A-Za-z_]\w*(?:\s*=[^;{}]*)?(?:\s*,\s*[A-Za-z_]\w*(?:\s*=[^;{}]*)?)*)\s*;/g;
   let match: RegExpExecArray | null;
   while ((match = fieldRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
-    const attrs = cls.rawBody.slice(match.index, match.index + (match[1] || '').length);
-    fields.push({
-      name: match[3]!,
-      typeName: match[2]!,
-      attributes: parseAttributes(attrs),
-      line: lineNumberAt(originalContent, cls.bodyOffset + match.index),
-      isStatic: /\bstatic\b/.test(match[0]!.slice((match[1] || '').length)),
-    });
+    const attrBlock = match[1] || '';
+    const modifiers = match[2] || '';
+    const typeName = match[3]!.replace(/\s+/g, ''); // `Dictionary<int, string>` → `Dictionary<int,string>`
+    const attrs = cls.rawBody.slice(match.index, match.index + attrBlock.length);
+    const parsedAttrs = parseAttributes(attrs);
+    const isStatic = /\bstatic\b/.test(modifiers);
+    const line = lineNumberAt(originalContent, cls.bodyOffset + match.index);
+    for (const decl of splitTopLevel(match[4]!)) {
+      const nameMatch = /^([A-Za-z_]\w*)/.exec(decl);
+      if (!nameMatch) continue;
+      fields.push({
+        name: nameMatch[1]!,
+        typeName,
+        attributes: parsedAttrs,
+        line,
+        isStatic,
+      });
+    }
   }
   return fields;
 }
@@ -646,6 +664,18 @@ function isLocalTypeReference(typeName: string): boolean {
   if (BUILTIN_TYPE_NAMES.has(clean)) return false;
   if (clean.startsWith('System.') || clean.startsWith('UnityEngine.')) return false;
   return true;
+}
+
+// The local user-type reference name for a field/property type, or null when the type is builtin,
+// external, or not resolvable to a single core identifier. Strips array/jagged/multidim ranks and
+// the nullable `?` so `PlayerData[]`, `PlayerData?`, and `Some.PlayerData` all reference
+// `PlayerData`. Generic types (`List<PlayerData>`) return null — element extraction from generic
+// arguments is a deliberate coverage bound (the container itself is not a local user type ref).
+function localTypeRefName(typeName: string): string | null {
+  const simpleFull = typeName.split('.').pop() || typeName;
+  const core = simpleFull.replace(/(\[[\s,]*\])+$/, '').replace(/\?$/, '');
+  if (!core || core.includes('<')) return null;
+  return isLocalTypeReference(core) ? core : null;
 }
 
 function localTypeFromTypeofArgs(args: string): string[] {
@@ -1055,8 +1085,8 @@ function processClass(
         const attr = findGatedAttribute(field.attributes, stack.syncVarAttribute, stack);
         if (!attr) continue;
         const fieldRefs = [`${FIELD_REF_PREFIX}${cls.name}.${field.name}`];
-        const simple = field.typeName.split('.').pop() || field.typeName;
-        if (isLocalTypeReference(field.typeName) || isLocalTypeReference(simple)) fieldRefs.push(simple);
+        const typeRef = localTypeRefName(field.typeName);
+        if (typeRef) fieldRefs.push(typeRef);
         pushNodeRef(
           result,
           seenNodes,
@@ -1115,8 +1145,8 @@ function processClass(
   for (const field of fields) {
     if (!hasSerializationAttribute(field.attributes)) continue;
     const refs = [`${FIELD_REF_PREFIX}${cls.name}.${field.name}`];
-    const simple = field.typeName.split('.').pop() || field.typeName;
-    if (isLocalTypeReference(field.typeName) || isLocalTypeReference(simple)) refs.push(simple);
+    const typeRef = localTypeRefName(field.typeName);
+    if (typeRef) refs.push(typeRef);
     pushNodeRef(
       result,
       seenNodes,
@@ -1134,8 +1164,8 @@ function processClass(
     );
     if (!fieldSerialize) continue;
     const refs = [`${FIELD_REF_PREFIX}${cls.name}.${prop.name}`];
-    const simple = prop.typeName.split('.').pop() || prop.typeName;
-    if (isLocalTypeReference(prop.typeName) || isLocalTypeReference(simple)) refs.push(simple);
+    const typeRef = localTypeRefName(prop.typeName);
+    if (typeRef) refs.push(typeRef);
     pushNodeRef(
       result,
       seenNodes,
