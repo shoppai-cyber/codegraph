@@ -513,10 +513,22 @@ function parseClassBlocks(content: string, filePath: string): { classes: ClassBl
     return null;
   };
 
+  // A bare class name is an ambiguous chain target when it is DECLARED more than once in the file
+  // (BLOCKING 1, round 2): the two declarations are distinct types living in different namespaces
+  // (`Foreign.Root : FishNet…` vs `Local.Root : Mirror…`), and the base-name chain lookup is
+  // namespace-blind — it cannot tell which `Root` a derived `: Root` meant. Conservatively refuse
+  // to install OR chain-propagate through any duplicated name (emit-nothing beats donating a
+  // foreign class an unrelated stack's ownership). Direct per-block classification is unaffected —
+  // each block is still classified from its OWN base in `resolved` below, so a directly-rooted
+  // block of a duplicated name still emits.
+  const nameCounts = new Map<string, number>();
+  for (const cls of classes) nameCounts.set(cls.name, (nameCounts.get(cls.name) ?? 0) + 1);
+
   // Name → direct HostInfo, the lookup target when another class in the same file names it as a
   // base. The whole descriptor propagates, so a same-file chain inherits its root's owning stacks.
   const directHostByName = new Map<string, HostInfo>();
   for (const cls of classes) {
+    if ((nameCounts.get(cls.name) ?? 0) > 1) continue;
     const info = directInfoFor(cls);
     if (info) directHostByName.set(cls.name, info);
   }
@@ -526,6 +538,7 @@ function parseClassBlocks(content: string, filePath: string): { classes: ClassBl
     changed = false;
     for (const cls of classes) {
       if (directHostByName.has(cls.name)) continue;
+      if ((nameCounts.get(cls.name) ?? 0) > 1) continue;
       const inheritedBase = cls.bases.find((b) => directHostByName.has(b));
       if (inheritedBase) {
         directHostByName.set(cls.name, directHostByName.get(inheritedBase)!);

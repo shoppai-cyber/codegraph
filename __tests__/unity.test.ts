@@ -1680,6 +1680,51 @@ class Child : BaseNet
       );
     });
 
+    // --- BLOCKING 1 (round 2): namespace-blind chain propagation must not donate ownership ---
+
+    it('does not donate Mirror ownership across a same-name collision in different namespaces', () => {
+      // Two distinct `Root` types: a FishNet-rooted one (foreign) and a Mirror-rooted one. The
+      // bare-name chain lookup must NOT let `Foreign.Child : Root` inherit the unrelated Mirror
+      // `Local.Root` — a duplicated class name is ambiguous, so nothing may propagate through it.
+      const result = extract(`
+using Mirror;
+namespace Foreign {
+    class Root : FishNet.Object.NetworkBehaviour {}
+    class Child : Root {
+        public void OnStartServer() {}
+        [Command] void CmdMove() {}
+    }
+}
+namespace Local {
+    class Root : NetworkBehaviour {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still classifies each declaration of a duplicated class name from its OWN direct base', () => {
+      // The ambiguity rule applies only to NAME-MAP/chain propagation. A class that is DIRECTLY
+      // rooted in a Mirror base still emits its own callbacks even when its bare name is reused
+      // in another namespace.
+      const result = extract(`
+using Mirror;
+namespace A { class Widget : NetworkBehaviour { public override void OnStartServer() {} } }
+namespace B { class Widget : NetworkBehaviour { public override void OnStartClient() {} } }
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Widget.OnStartServer',
+          'UNITY NetworkBehaviour.OnStartClient Widget.OnStartClient',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Widget.OnStartServer',
+          'references:unity:host:Widget.OnStartClient',
+        ].sort()
+      );
+    });
+
     // --- SyncVar field liveness ---
 
     it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {
