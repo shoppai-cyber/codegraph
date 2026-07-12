@@ -143,7 +143,7 @@ fabricate edges in a project on any of those stacks.
 |---|---|
 | `src/resolution/frameworks/unity-invocation-table.json` | **NEW `mirror` section** — gate (NGO/FishNet/Fusion disqualifiers), `NetworkBehaviour` host callbacks + MonoBehaviour union, `attributeEntryPoints` (Command/ClientRpc/TargetRpc), `syncVarFields`, `syncVarHooks`, excluded/deferred rows, eventSubscriptions. Top-level `consumed.mirror` + version 0.3.0 → 0.4.0. |
 | `src/resolution/frameworks/unity.ts` | Consumes `TABLE.mirror` through the generic `GATED_STACKS` mechanism (added in the preceding refactor). NEW: SyncVar field + hook emission block; FQ-base stack-ownership guard so an open Mirror gate can't claim a FishNet-FQ-based class. |
-| `__tests__/unity.test.ts` | **NEW `describe('extract() — Mirror networking (Tier 2, gated)')`** — 21 cases, exhaustive `.toEqual` assertions. |
+| `__tests__/unity.test.ts` | **NEW `describe('extract() — Mirror networking (Tier 2, gated)')`** — 48 cases, exhaustive `.toEqual` assertions (grown from the initial 21 by the adversarial-review hardening pass: FQ-collision/chain-ownership, raw-name attribute qualification, array/nullable/generic/multi-declarator SyncVar fields, the all-12-callback sweep, and the design-v2 gate matrix). |
 
 This work sits on top of two preceding commits on the same branch: a **generic-GATED_STACKS refactor**
 (generalizes the FishNet-specific gate/host/RPC code to run any number of stacks from data, no behavior
@@ -186,9 +186,11 @@ change, all FishNet tests green) and a **gate-hardening pass** (F1–F4 below).
 
 ## Verification
 
-- `npx vitest run __tests__/unity.test.ts`: **67 passed / 67** (41 pre-existing Tier-1/FishNet + 2
-  Phase-0 characterization + 6 gate-hardening + 3 stack/registration + the 21-case Mirror block; no
-  pre-existing FishNet assertion weakened or removed).
+- `npx vitest run __tests__/unity.test.ts`: **97 passed / 97**. Per describe block (sums to 97):
+  1 top-level + 12 host-base/lifecycle + 13 fields/attributes/strings + 13 FishNet + 6 gate-hardening
+  (F1–F4) + 48 Mirror + 4 detect/claimsReference/resolve. No pre-existing FishNet or Tier-1 assertion
+  was weakened or removed. (Earlier drafts of this doc miscounted — a 20-vs-21 slip and a breakdown
+  that didn't sum; the block-level counts above are the authoritative figures.)
 - `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**.
 - **Corpus verification (Mirror 96.10.3, `mirror_docs.sqlite`): ZERO corrections.** All 12 host
   callbacks, `NetworkBehaviour : MonoBehaviour`, the 3 RPC + guard + editor attribute classes,

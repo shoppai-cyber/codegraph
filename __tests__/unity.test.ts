@@ -1243,6 +1243,45 @@ class Player : NetworkBehaviour
       );
     });
 
+    it('recognizes ALL 12 Mirror NetworkBehaviour override callbacks', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    public override void OnStopServer() {}
+    public override void OnStartClient() {}
+    public override void OnStopClient() {}
+    public override void OnStartLocalPlayer() {}
+    public override void OnStopLocalPlayer() {}
+    public override void OnStartAuthority() {}
+    public override void OnStopAuthority() {}
+    public override bool OnSerialize(NetworkWriter writer, bool initialState) { return true; }
+    public override void OnDeserialize(NetworkReader reader, bool initialState) {}
+    protected override void SerializeSyncVars(NetworkWriter writer, bool initialState) {}
+    protected override void DeserializeSyncVars(NetworkReader reader, bool initialState) {}
+    void NotACallback() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY NetworkBehaviour.OnStopServer Player.OnStopServer',
+          'UNITY NetworkBehaviour.OnStartClient Player.OnStartClient',
+          'UNITY NetworkBehaviour.OnStopClient Player.OnStopClient',
+          'UNITY NetworkBehaviour.OnStartLocalPlayer Player.OnStartLocalPlayer',
+          'UNITY NetworkBehaviour.OnStopLocalPlayer Player.OnStopLocalPlayer',
+          'UNITY NetworkBehaviour.OnStartAuthority Player.OnStartAuthority',
+          'UNITY NetworkBehaviour.OnStopAuthority Player.OnStopAuthority',
+          'UNITY NetworkBehaviour.OnSerialize Player.OnSerialize',
+          'UNITY NetworkBehaviour.OnDeserialize Player.OnDeserialize',
+          'UNITY NetworkBehaviour.SerializeSyncVars Player.SerializeSyncVars',
+          'UNITY NetworkBehaviour.DeserializeSyncVars Player.DeserializeSyncVars',
+        ].sort()
+      );
+    });
+
     it('emits nothing for a NetworkBehaviour class with no Mirror using', () => {
       const result = extract(`
 class Player : NetworkBehaviour
@@ -1442,6 +1481,107 @@ class Player : NetworkBehaviour
 }
 `);
       expect(notMirror).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens the Mirror gate on a sub-namespace using (using Mirror.Components)', () => {
+      const result = extract(`
+using Mirror.Components;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY attribute Command Player.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdMove'].sort()
+      );
+    });
+
+    it('does not treat a Mirror using-ALIAS directive as gate evidence', () => {
+      const result = extract(`
+using Mirror = Some.Other.Namespace;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not open the Mirror gate on a FQ Mirror.NetworkBehaviour token used only as a field type', () => {
+      const result = extract(`
+class Holder
+{
+    Mirror.NetworkBehaviour reference;
+}
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('closes the Mirror gate when a FQ Mirror base is combined with using Fusion (Fusion disqualifier)', () => {
+      const result = extract(`
+using Fusion;
+
+class Player : Mirror.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a STATIC [Command] under an open Mirror gate (requiresInstance)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Command] static void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not open the Mirror gate for a commented-out using directive', () => {
+      const result = extract(`
+// using Mirror;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not double-emit for a plain MonoBehaviour class under an open Mirror gate', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : MonoBehaviour
+{
+    void Update() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY MonoBehaviour.Update Player.Update']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.Update']);
     });
 
     // --- BLOCKING 1: foreign fully-qualified NetworkBehaviour bases must NOT be claimed ---
