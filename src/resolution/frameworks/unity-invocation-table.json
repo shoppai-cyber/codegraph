@@ -434,9 +434,9 @@
     "deferredPackageAttributes": {
       "networking": {
         "rows": ["ClientRpc", "Rpc", "Command", "SyncVar hook"],
-        "reason": "Netcode-for-GameObjects (NGO), Mirror, and legacy UNet attributes; package-specific and name-colliding. [ClientRpc]/[Rpc] (NGO + Mirror), [Command] (Mirror/UNet), and Mirror's [SyncVar(hook=...)] have no FishNet-gated home in v1.",
-        "graduated": "FishNet's ServerRpc, ObserversRpc, TargetRpc, Replicate, and Reconcile GRADUATED to the consumed top-level `fishnet` section, which fires only behind the per-file FishNet using-gate. NGO/Mirror ServerRpc/TargetRpc are still excluded here: the fishnet gate emits nothing in any file importing Unity.Netcode or Mirror.",
-        "futureGate": "For the still-deferred NGO/Mirror/UNet rows: require package evidence such as using Unity.Netcode or using Mirror plus their NetworkBehaviour base; likely sibling gated sections mirroring the fishnet one."
+        "reason": "Remaining deferred rows are the Netcode-for-GameObjects (NGO) and legacy UNet variants of these package-specific, name-colliding attributes. Mirror's and FishNet's own copies have GRADUATED to consumed gated sections (see `graduated`); the tokens listed here now refer ONLY to the still-unconsumed NGO/UNet stacks.",
+        "graduated": "FishNet's ServerRpc/ObserversRpc/TargetRpc/Replicate/Reconcile GRADUATED to the consumed top-level `fishnet` section, and Mirror's Command/ClientRpc/TargetRpc plus [SyncVar] / [SyncVar(hook=...)] GRADUATED to the consumed top-level `mirror` section — each fires only behind its own per-file gate (a required using-prefix OR that stack's fully-qualified NetworkBehaviour base). NGO/UNet ServerRpc/ClientRpc/Command/SyncVar remain excluded here: the fishnet and mirror gates each emit nothing in any file importing a competing stack.",
+        "futureGate": "For the still-deferred NGO/UNet rows: require package evidence such as using Unity.Netcode (NGO) or the UnityEngine.Networking UNet namespace plus their NetworkBehaviour base; likely sibling gated sections mirroring the fishnet and mirror ones."
       },
       "tests": {
         "rows": ["Test", "UnityTest", "SetUp", "TearDown", "OneTimeSetUp", "OneTimeTearDown", "UnitySetUp", "UnityTearDown"],

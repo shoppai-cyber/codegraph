@@ -161,10 +161,14 @@ change, all FishNet tests green) and a **gate-hardening pass** (F1–F4 below).
 - **SyncVar field liveness reuses the serialized-field emission shape.** A non-static `[SyncVar]` field
   emits the same `unity:field:` reference (plus a local-type type-ref) the Tier-1 serialized-field rule
   already emits — no new reference kind.
-- **SyncVar hook matching is aligned with the Weaver, not narrower.** Mirror's `FindHookMethod` searches
-  only the declaring type's own methods (`td.GetMethods()` → `td.Methods`), so same-class-block
-  resolution is exactly the Weaver's scope. Overloads are deliberately not disambiguated (the Weaver
-  picks by the 2-param signature; we won't guess a signature).
+- **SyncVar hook matching is block-local — the Weaver's scope for a single-block class, deliberately
+  narrower for partial classes.** Mirror's `FindHookMethod` searches the declaring type's
+  compiler-merged method table (`td.Methods`), which spans *every* `partial` declaration of the type
+  across all files. Our resolution is scoped to the single class BLOCK the field is declared in, so for
+  a type split across multiple `partial` blocks it is strictly narrower than the Weaver: a hook whose
+  method lives in a sibling partial block resolves to nothing (emit-nothing, not a cross-block guess).
+  For the common single-block class the two scopes coincide. Overloads are deliberately not
+  disambiguated either (the Weaver picks by the 2-param signature; we won't guess a signature).
 - **RPC self-reference supplements, does not assert-uncalled.** Because Mirror RPC methods are commonly
   called directly in user code (Weaver-rewritten call site), the synthetic entry-point reference is
   additive to any real callers.
