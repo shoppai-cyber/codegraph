@@ -1843,6 +1843,62 @@ namespace B { class Widget : NetworkBehaviour { public override void OnStartClie
       );
     });
 
+    // --- BLOCKING 1 (round 3): only a BARE-written base may drive same-file chain propagation ---
+
+    it('does not chain a dotted external base into an unrelated local Mirror Root', () => {
+      // `Other.Root` is a type from another file/assembly. Its last segment collides with the
+      // local `Local.Root : NetworkBehaviour`, but a dotted base must never be shortened into a
+      // same-file chain target — `Foreign.Child : Other.Root` is not a Mirror class.
+      const result = extract(`
+using Mirror;
+namespace Local { class Root : NetworkBehaviour {} }
+namespace Foreign {
+    class Child : Other.Root {
+        public void OnStartServer() {}
+        [Command] void CmdMove() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not chain a dotted external base into an unrelated local FishNet Root', () => {
+      const result = extract(`
+using FishNet.Object;
+namespace Local { class Root : NetworkBehaviour {} }
+namespace Foreign {
+    class Child : Other.Root {
+        public void OnStartServer() {}
+        [ServerRpc] void RpcMove() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still chains a bare same-file base written without a qualifier', () => {
+      const result = extract(`
+using Mirror;
+class Root : NetworkBehaviour {}
+class Child : Root {
+    public void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.CmdMove',
+        ].sort()
+      );
+    });
+
     // --- SyncVar field liveness ---
 
     it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {

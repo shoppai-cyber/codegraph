@@ -478,6 +478,21 @@ function parseAliases(content: string): Map<string, string> {
   return aliases;
 }
 
+// A base may drive same-file chain propagation only when it was written BARE in source — its full
+// form carries no dot (BLOCKING 1, round 3). A dotted base, whether spelled explicitly
+// (`Other.Root`) or alias-expanded into a foreign namespace, denotes a specific external type and
+// must never be shortened into a same-file class that merely shares its last segment. Owning FQ
+// bases (`Mirror.NetworkBehaviour`) are admitted directly by classifyHost, not through this
+// same-file name chain, so excluding all dotted bases here loses no real edge.
+function chainableBase(cls: ClassBlock, byName: Map<string, HostInfo>): string | null {
+  for (let i = 0; i < cls.bases.length; i++) {
+    if (cls.fullBases[i]!.includes('.')) continue;
+    const bare = cls.bases[i]!;
+    if (byName.has(bare)) return bare;
+  }
+  return null;
+}
+
 function parseClassBlocks(
   content: string,
   filePath: string
@@ -553,7 +568,7 @@ function parseClassBlocks(
     for (const cls of classes) {
       if (directHostByName.has(cls.name)) continue;
       if ((nameCounts.get(cls.name) ?? 0) > 1) continue;
-      const inheritedBase = cls.bases.find((b) => directHostByName.has(b));
+      const inheritedBase = chainableBase(cls, directHostByName);
       if (inheritedBase) {
         directHostByName.set(cls.name, directHostByName.get(inheritedBase)!);
         changed = true;
@@ -563,7 +578,7 @@ function parseClassBlocks(
 
   const resolved = classes.map((cls) => {
     const direct = directInfoFor(cls);
-    const chainedBase = cls.bases.find((b) => directHostByName.has(b));
+    const chainedBase = chainableBase(cls, directHostByName);
     const info = direct ?? (chainedBase ? directHostByName.get(chainedBase)! : null);
     return {
       ...cls,
