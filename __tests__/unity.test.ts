@@ -501,6 +501,20 @@ class Player : MonoBehaviour
       );
     });
 
+    it('emits a [SerializeField] field with a GENERIC constructor initializer (Tier-1, BLOCKING 4)', () => {
+      const result = extract(`
+using UnityEngine;
+using System.Collections.Generic;
+
+class Player : MonoBehaviour
+{
+    [SerializeField] Dictionary<int,string> lookup = new Dictionary<int,string>();
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY serialized field Player.lookup']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
     it('emits nothing for a CONST [SerializeField] field (Unity does not serialize consts; BLOCKING 3)', () => {
       const result = extract(`
 using UnityEngine;
@@ -2134,6 +2148,46 @@ class Player : NetworkBehaviour
 `);
       expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.lookup']);
       expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
+    it('keeps a [SyncVar] field with a GENERIC constructor initializer live (BLOCKING 4)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] Dictionary<int,string> lookup = new Dictionary<int,string>();
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.lookup']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
+    it('keeps a [SyncVar] field with a NESTED-generic constructor initializer live (BLOCKING 4)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] Dictionary<int, List<Foo>> lookup = new Dictionary<int, List<Foo>>();
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.lookup']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
+    it('emits nothing (and does not crash) for a comparison-operator initializer (BLOCKING 4)', () => {
+      // `a < b` opens an angle context that never closes before the top-level `;`, so the scan
+      // bails on the whole declaration rather than mis-splitting on the generic-looking comma.
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int x = a < b, y = 2;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
     });
 
     it('emits one row per name for a MULTI-DECLARATOR [SyncVar] field', () => {

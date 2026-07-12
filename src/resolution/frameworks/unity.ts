@@ -824,20 +824,36 @@ function scanFieldDeclaration(body: string, from: number): FieldScan | null {
     if (c === '=') {
       if (body[i + 1] === '>' || body[i + 1] === '=') return null; // expression body / comparison — not a field
       i++;
+      // Scan the initializer to the top-level `;` (or `,` for the next declarator). Track `()[]{}`
+      // depth AND angle-bracket depth (BLOCKING 4): a `<` immediately after an identifier char or a
+      // closing `>` opens a generic context (`new Dictionary<int,string>()`), so its commas are NOT
+      // declarator separators. A `<` used as a comparison operator (`a < b`) also opens the context
+      // but never closes, so the initializer is unbalanced at its `;` and the whole declaration
+      // bails (emit nothing) rather than mis-splitting on the comma.
       let depth = 0;
+      let angle = 0;
+      let prev = '=';
       for (; i < n; i++) {
-        const ch = body[i];
+        const ch = body[i]!;
         if (ch === '(' || ch === '[' || ch === '{') depth++;
         else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
-        else if (depth === 0 && (ch === ',' || ch === ';')) break;
+        else if (ch === '<' && (isIdentPart(prev) || prev === '>')) angle++;
+        else if (ch === '>' && angle > 0) angle--;
+        else if (depth === 0) {
+          if (ch === ';') break; // top-level statement terminator, even with an open angle context
+          if (angle === 0 && ch === ',') break; // declarator separator — only outside a generic
+        }
+        if (!isFieldWs(ch)) prev = ch;
       }
       if (i >= n) return null; // unterminated initializer
-      if (body[i] === ',') {
-        i++;
-        continue;
+      if (body[i] === ';') {
+        if (angle !== 0) return null; // unbalanced generic / comparison operator — bail (emit nothing)
+        i++; // consume ';'
+        break;
       }
-      i++; // consume ';'
-      break;
+      // body[i] === ',' — another declarator follows.
+      i++;
+      continue;
     }
     if (c === ',') {
       i++;
