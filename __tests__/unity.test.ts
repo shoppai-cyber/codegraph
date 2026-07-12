@@ -486,6 +486,33 @@ class Player : MonoBehaviour
       );
     });
 
+    it('emits a [SerializeField] field with a BRACE object initializer (Tier-1, BLOCKING 3)', () => {
+      const result = extract(`
+using UnityEngine;
+
+class Player : MonoBehaviour
+{
+    [SerializeField] PlayerData data = new PlayerData { Health = 100 };
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY serialized field Player.data']);
+      expect(refPairs(result)).toEqual(
+        ['references:PlayerData', 'references:unity:field:Player.data'].sort()
+      );
+    });
+
+    it('emits nothing for a CONST [SerializeField] field (Unity does not serialize consts; BLOCKING 3)', () => {
+      const result = extract(`
+using UnityEngine;
+
+class Player : MonoBehaviour
+{
+    [SerializeField] const int health = 100;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
     it('emits field-target SerializeField on auto-properties as property liveness', () => {
       const result = extract(`
 using UnityEngine;
@@ -2015,6 +2042,95 @@ class Player : NetworkBehaviour
       expect(refPairs(result)).toEqual(
         ['references:unity:field:Player.health', 'references:unity:field:Player.shield'].sort()
       );
+    });
+
+    // --- SyncVar field brace initializers / const / nullable-array / perf (BLOCKING 3, SHOULD-FIX 4/5) ---
+
+    it('keeps a [SyncVar] field with a BRACE object initializer live (BLOCKING 3)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData data = new PlayerData { Health = 100 };
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.data']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.data', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('emits nothing for a CONST [SyncVar] field (const is implicitly static; BLOCKING 3)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] const int health = 100;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('references the ELEMENT type of a nullable-array [SyncVar] field (T[]?; SHOULD-FIX 5)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData[]? roster;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.roster']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.roster', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('references the ELEMENT type of a nullable-element array [SyncVar] field (T?[]; SHOULD-FIX 5)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData?[] roster;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.roster']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.roster', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('keeps a JAGGED-array [SyncVar] field live (builtin element, no type ref; SHOULD-FIX 5)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int[][] grid;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.grid']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.grid']);
+    });
+
+    it('does not hang on an unclosed generic in an attributed field (SHOULD-FIX 4)', () => {
+      const payload = 'X'.repeat(100_000);
+      const source = `
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] A<${payload} value;
+}
+`;
+      const start = Date.now();
+      const result = extract(source);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(2000);
+      expect(result).toEqual({ nodes: [], references: [] });
     });
 
     // --- SyncVar hook resolution ---

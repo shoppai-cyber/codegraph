@@ -565,7 +565,11 @@ function parseClassBlocks(
 
 function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
   const methods: MethodDecl[] = [];
-  const methodRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{/g;
+  // The return-type span is length-bounded (`{0,512}`) so an unclosed generic in a pathological
+  // line (SHOULD-FIX 4) can't trigger the quadratic per-position rescan this pattern otherwise
+  // does — 512 chars is far beyond any real signature's return type. Same bound on the
+  // expression-bodied and no-body declaration regexes below.
+  const methodRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{/g;
   let match: RegExpExecArray | null;
   while ((match = methodRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
@@ -585,7 +589,7 @@ function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
     });
   }
 
-  const expressionRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*=>[^;{}]*;/g;
+  const expressionRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*=>[^;{}]*;/g;
   while ((match = expressionRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
     const header = match[0]!;
@@ -601,7 +605,7 @@ function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
     });
   }
 
-  const declarationRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern|abstract)\s+)*[A-Za-z_][\w<>,\s\[\]?.]*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;/g;
+  const declarationRegex = /((?:\s*\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern|abstract)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;/g;
   while ((match = declarationRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
     const header = match[0]!;
@@ -620,38 +624,180 @@ function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
   return methods;
 }
 
+const FIELD_MODIFIERS = new Set([
+  'public',
+  'private',
+  'protected',
+  'internal',
+  'static',
+  'readonly',
+  'volatile',
+  'new',
+  'const',
+]);
+
+function isFieldWs(c: string | undefined): boolean {
+  return c === ' ' || c === '\t' || c === '\r' || c === '\n' || c === '\f' || c === '\v';
+}
+function isIdentStart(c: string | undefined): boolean {
+  return c !== undefined && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_');
+}
+function isIdentPart(c: string | undefined): boolean {
+  return isIdentStart(c) || (c !== undefined && c >= '0' && c <= '9');
+}
+
+interface FieldScan {
+  typeName: string;
+  isStatic: boolean;
+  names: string[];
+  end: number;
+}
+
+// Single-pass balanced scanner for a field declaration, starting immediately after its leading
+// attribute block. Replaces the old catastrophically-backtracking field regex (SHOULD-FIX 4): the
+// type's generic `<...>` and array ranks are scanned by balanced depth, and a declarator's `=`
+// initializer is consumed to the top-level `;`/`,` so brace object initializers survive (BLOCKING
+// 3). `const` counts as static (C# consts are implicitly static — Unity never serializes them and
+// Mirror rejects static SyncVars, so treating them as static routes them to the emit-nothing
+// path). Any unbalanced/unterminated form returns null (skip, emit nothing) rather than backtrack,
+// and a trailing `(`/`{` (method/property) also returns null so only true fields are emitted.
+function scanFieldDeclaration(body: string, from: number): FieldScan | null {
+  const n = body.length;
+  let i = from;
+  const skipWs = () => {
+    while (i < n && isFieldWs(body[i])) i++;
+  };
+
+  skipWs();
+  let isStatic = false;
+  // Modifiers: consume leading identifier words that are field modifiers; the first word that is
+  // not a modifier is the start of the TYPE (rewound below).
+  for (;;) {
+    const start = i;
+    while (i < n && isIdentPart(body[i])) i++;
+    if (i === start) break;
+    const word = body.slice(start, i);
+    if (FIELD_MODIFIERS.has(word)) {
+      if (word === 'static' || word === 'const') isStatic = true;
+      skipWs();
+      continue;
+    }
+    i = start;
+    break;
+  }
+
+  // TYPE: dotted name, then interleaved balanced generic `<...>`, nullable `?`, and array ranks
+  // `[]`/`[,]` in any order.
+  const typeStart = i;
+  if (!isIdentStart(body[i])) return null;
+  while (i < n && (isIdentPart(body[i]) || body[i] === '.')) i++;
+  for (;;) {
+    let j = i;
+    while (j < n && isFieldWs(body[j])) j++;
+    const c = body[j];
+    if (c === '<') {
+      let depth = 0;
+      let k = j;
+      for (; k < n; k++) {
+        const ch = body[k];
+        if (ch === '<') depth++;
+        else if (ch === '>') {
+          depth--;
+          if (depth === 0) {
+            k++;
+            break;
+          }
+        } else if (ch === ';' || ch === '{' || ch === '}') {
+          return null; // unterminated generic — bail instead of backtracking
+        }
+      }
+      if (depth !== 0) return null; // generic never closed
+      i = k;
+    } else if (c === '?') {
+      i = j + 1;
+    } else if (c === '[') {
+      let k = j + 1;
+      while (k < n && (isFieldWs(body[k]) || body[k] === ',')) k++;
+      if (body[k] !== ']') return null; // not an array rank
+      i = k + 1;
+    } else {
+      break;
+    }
+  }
+  const typeName = body.slice(typeStart, i).replace(/\s+/g, '');
+  if (!typeName) return null;
+
+  // DECLARATOR list: `name` with an optional `= initializer` (balanced to the top-level `;`/`,`),
+  // comma-separated, terminated by a top-level `;`.
+  const names: string[] = [];
+  for (;;) {
+    skipWs();
+    if (!isIdentStart(body[i])) return null;
+    const ns = i;
+    while (i < n && isIdentPart(body[i])) i++;
+    names.push(body.slice(ns, i));
+    skipWs();
+    const c = body[i];
+    if (c === '=') {
+      if (body[i + 1] === '>' || body[i + 1] === '=') return null; // expression body / comparison — not a field
+      i++;
+      let depth = 0;
+      for (; i < n; i++) {
+        const ch = body[i];
+        if (ch === '(' || ch === '[' || ch === '{') depth++;
+        else if (ch === ')' || ch === ']' || ch === '}') depth = Math.max(0, depth - 1);
+        else if (depth === 0 && (ch === ',' || ch === ';')) break;
+      }
+      if (i >= n) return null; // unterminated initializer
+      if (body[i] === ',') {
+        i++;
+        continue;
+      }
+      i++; // consume ';'
+      break;
+    }
+    if (c === ',') {
+      i++;
+      continue;
+    }
+    if (c === ';') {
+      i++;
+      break;
+    }
+    return null; // '('/'{' (method/property) or anything unexpected — not a field
+  }
+
+  return { typeName, isStatic, names, end: i };
+}
+
 function parseFields(cls: ClassBlock, originalContent: string): MemberDecl[] {
   const fields: MemberDecl[] = [];
-  // A field we care about always carries an attribute block (bare fields are never emitted).
-  // Groups: (1) attribute block, (2) modifiers, (3) type, (4) declarator list.
-  // The TYPE supports a plain/dotted name, a generic argument list (`<...>`, which may carry
-  // commas and spaces), a nullable `?`, and one-or-more array ranks (`[]`, `[,]`, `[][]`). The
-  // DECLARATOR list is a comma-separated set of `name` (with an optional `= initializer`) so a
-  // multi-declarator field (`[SyncVar] int a, b, c;`) yields one MemberDecl per name. Parens are
-  // excluded from names, so a method declaration (`void Foo();`) never matches as a field.
-  const fieldRegex =
-    /((?:\s*\[[^\]]+\]\s*)+)((?:(?:public|private|protected|internal|static|readonly|volatile|new|const)\s+)*)([A-Za-z_][\w.]*(?:\s*<[^;{}]*>)?\s*\??(?:\s*\[[\s,]*\])*)\s+([A-Za-z_]\w*(?:\s*=[^;{}]*)?(?:\s*,\s*[A-Za-z_]\w*(?:\s*=[^;{}]*)?)*)\s*;/g;
+  // A field we care about always carries an attribute block (bare fields are never emitted). Anchor
+  // on that block, then hand-scan the declaration that follows (scanFieldDeclaration) so brace
+  // initializers, nullable-array ranks, and adversarial/unclosed generics resolve in one linear
+  // pass with no regex backtracking.
+  const attrBlockRegex = /(?:\[[^\]]+\]\s*)+/g;
   let match: RegExpExecArray | null;
-  while ((match = fieldRegex.exec(cls.body)) !== null) {
+  while ((match = attrBlockRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
-    const attrBlock = match[1] || '';
-    const modifiers = match[2] || '';
-    const typeName = match[3]!.replace(/\s+/g, ''); // `Dictionary<int, string>` → `Dictionary<int,string>`
+    const scan = scanFieldDeclaration(cls.body, attrBlockRegex.lastIndex);
+    if (!scan) continue;
+    const attrBlock = match[0];
     const attrs = cls.rawBody.slice(match.index, match.index + attrBlock.length);
     const parsedAttrs = parseAttributes(attrs);
-    const isStatic = /\bstatic\b/.test(modifiers);
     const line = lineNumberAt(originalContent, cls.bodyOffset + match.index);
-    for (const decl of splitTopLevel(match[4]!)) {
-      const nameMatch = /^([A-Za-z_]\w*)/.exec(decl);
-      if (!nameMatch) continue;
+    for (const name of scan.names) {
       fields.push({
-        name: nameMatch[1]!,
-        typeName,
+        name,
+        typeName: scan.typeName,
         attributes: parsedAttrs,
         line,
-        isStatic,
+        isStatic: scan.isStatic,
       });
     }
+    // Advance past the whole consumed declaration so array ranks inside it are not re-matched as
+    // attribute blocks on the next iteration.
+    attrBlockRegex.lastIndex = scan.end;
   }
   return fields;
 }
@@ -689,7 +835,14 @@ function isLocalTypeReference(typeName: string): boolean {
 // arguments is a deliberate coverage bound (the container itself is not a local user type ref).
 function localTypeRefName(typeName: string): string | null {
   const simpleFull = typeName.split('.').pop() || typeName;
-  const core = simpleFull.replace(/(\[[\s,]*\])+$/, '').replace(/\?$/, '');
+  // Strip trailing nullable `?` and array ranks (`[]`, `[,]`) in ANY order, so `PlayerData[]?`,
+  // `PlayerData?[]`, and jagged combinations all reduce to the bare element `PlayerData`.
+  let core = simpleFull;
+  for (;;) {
+    const next = core.replace(/\?$/, '').replace(/\[[\s,]*\]$/, '');
+    if (next === core) break;
+    core = next;
+  }
   if (!core || core.includes('<')) return null;
   return isLocalTypeReference(core) ? core : null;
 }
@@ -1186,6 +1339,7 @@ function processClass(
   }
 
   for (const field of fields) {
+    if (field.isStatic) continue; // Unity does not serialize static/const fields
     if (!hasSerializationAttribute(field.attributes)) continue;
     const refs = [`${FIELD_REF_PREFIX}${cls.name}.${field.name}`];
     const typeRef = localTypeRefName(field.typeName);
