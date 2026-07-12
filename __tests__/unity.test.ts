@@ -960,6 +960,31 @@ class Player : NetworkBehaviour
       expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
     });
 
+    it('emits nothing for a DESCENDANT-qualified [FishNet.Whatever.ServerRpc] (exact qualifier only, BLOCKING 2 r2)', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [FishNet.Whatever.ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a foreign attribute ALIAS shadowing the bare [ServerRpc] token (BLOCKING 2 r2)', () => {
+      const result = extract(`
+using FishNet.Object;
+using ServerRpc = Other.ServerRpcAttribute;
+
+class Player : NetworkBehaviour
+{
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
     it('emits RPC and prediction attribute entry points on a NetworkBehaviour-based class', () => {
       const result = extract(`
 using FishNet.Object;
@@ -1434,6 +1459,72 @@ class Player : NetworkBehaviour
 }
 `);
       expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- attribute provenance: exact qualifier + alias resolution (BLOCKING 2, round 2) ---
+
+    it('emits nothing for a DESCENDANT-qualified [Mirror.Whatever.Command] (exact qualifier only)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.Whatever.Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a DESCENDANT-qualified [Mirror.Whatever.SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.Whatever.SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a foreign attribute ALIAS shadowing the bare [Command] token', () => {
+      const result = extract(`
+using Mirror;
+using Command = Other.CommandAttribute;
+
+class Player : NetworkBehaviour
+{
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a foreign attribute ALIAS shadowing the bare [SyncVar] token', () => {
+      const result = extract(`
+using Mirror;
+using SyncVar = Other.SyncVarAttribute;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still emits when an alias resolves the bare token to Mirror own attribute', () => {
+      const result = extract(`
+using Mirror;
+using Command = Mirror.CommandAttribute;
+
+class Player : NetworkBehaviour
+{
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
     });
 
     it('opens the gate on a fully-qualified Mirror.NetworkBehaviour base without a using', () => {

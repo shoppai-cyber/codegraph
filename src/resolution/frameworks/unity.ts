@@ -467,7 +467,10 @@ function parseAliases(content: string): Map<string, string> {
   return aliases;
 }
 
-function parseClassBlocks(content: string, filePath: string): { classes: ClassBlock[]; openStacks: GatedStack[] } {
+function parseClassBlocks(
+  content: string,
+  filePath: string
+): { classes: ClassBlock[]; openStacks: GatedStack[]; aliases: Map<string, string> } {
   const noComments = stripCommentsForRegex(content, 'csharp');
   const safe = maskStringLiterals(noComments);
   const aliases = parseAliases(safe);
@@ -557,7 +560,7 @@ function parseClassBlocks(content: string, filePath: string): { classes: ClassBl
       applicableStacks: info ? info.applicable : [],
     };
   });
-  return { classes: resolved, openStacks };
+  return { classes: resolved, openStacks, aliases };
 }
 
 function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
@@ -771,25 +774,25 @@ function findAttribute(attrs: AttributeUse[], name: string): AttributeUse | unde
 }
 
 // True when `qualifier` (the namespace part of a written attribute name, e.g. `Mirror` in
-// `[Mirror.Command]`) belongs to a gated stack's own namespace — one of its using prefixes or
-// the namespace root of its fully-qualified base. `FishNet.Object` belongs to FishNet, `Other`
-// belongs to nobody.
+// `[Mirror.Command]`) is EXACTLY one of a gated stack's own namespaces — a using prefix or the
+// namespace of its fully-qualified base. Descendant namespaces are NOT accepted (BLOCKING 2,
+// round 2): Mirror's four gated attributes live directly in namespace `Mirror`, FishNet's in
+// `FishNet.Object`, so `Mirror.Whatever.Command` / `FishNet.Whatever.ServerRpc` are foreign
+// custom types that merely share a leading segment — matching them fabricated edges.
 function attrQualifierBelongsToStack(qualifier: string, stack: GatedStack): boolean {
   const owners = [...stack.usingPrefixes];
   if (stack.fqBaseAlternative) {
     const ns = stack.fqBaseAlternative.split('.').slice(0, -1).join('.');
     if (ns) owners.push(ns);
   }
-  return owners.some((p) => qualifier === p || qualifier.startsWith(`${p}.`));
+  return owners.some((p) => qualifier === p);
 }
 
-// Gated attribute matching (BLOCKING 3): inspect the RAW written attribute token, not the
-// fully-normalized name (which strips every namespace and would let a foreign `[Other.Command]`
-// masquerade as Mirror's `[Command]`). Accept a bare token (`Command`), an `Attribute`-suffixed
-// token (`CommandAttribute`), or a qualified token ONLY when the qualifier belongs to the owning
-// stack's namespace (`Mirror.Command`, `Mirror.CommandAttribute`, `FishNet.Object.ServerRpc`).
-function gatedAttributeMatches(rawName: string, ruleName: string, stack: GatedStack): boolean {
-  const segments = rawName.split('.');
+// True when a dotted or bare attribute SPELLING resolves to the owning stack's own attribute.
+// A bare token matches by name (the caller decides provenance); a dotted token requires an EXACT
+// owning-namespace qualifier. Used both for a written attribute and for a C# alias's target.
+function spellingIsOwningAttribute(name: string, ruleName: string, stack: GatedStack): boolean {
+  const segments = name.split('.');
   const last = segments[segments.length - 1]!;
   const bareLast = last.endsWith('Attribute') ? last.slice(0, -'Attribute'.length) : last;
   if (bareLast !== ruleName) return false;
@@ -797,12 +800,38 @@ function gatedAttributeMatches(rawName: string, ruleName: string, stack: GatedSt
   return attrQualifierBelongsToStack(segments.slice(0, -1).join('.'), stack);
 }
 
+// Gated attribute matching (BLOCKING 3 + BLOCKING 2 r2): inspect the RAW written attribute token,
+// not the fully-normalized name (which strips every namespace and would let a foreign
+// `[Other.Command]` masquerade as Mirror's `[Command]`). Accept a bare token (`Command`), an
+// `Attribute`-suffixed token (`CommandAttribute`), or a qualified token ONLY when the qualifier is
+// EXACTLY the owning stack's namespace. A C# using-alias shadows a bare token: when the written
+// single-identifier token is a using-alias in scope, it does NOT denote the framework attribute —
+// resolve the alias TARGET and accept only when THAT is the owning stack's own attribute (so
+// `using Command = Other.CommandAttribute; [Command]` is foreign, while `using Command =
+// Mirror.CommandAttribute; [Command]` survives). An unqualified alias target cannot prove
+// provenance and is rejected (emit-nothing).
+function gatedAttributeMatches(
+  rawName: string,
+  ruleName: string,
+  stack: GatedStack,
+  aliases: Map<string, string>
+): boolean {
+  const segments = rawName.split('.');
+  if (segments.length === 1 && aliases.has(rawName)) {
+    const target = aliases.get(rawName)!;
+    if (!target.includes('.')) return false;
+    return spellingIsOwningAttribute(target, ruleName, stack);
+  }
+  return spellingIsOwningAttribute(rawName, ruleName, stack);
+}
+
 function findGatedAttribute(
   attrs: AttributeUse[],
   ruleName: string,
-  stack: GatedStack
+  stack: GatedStack,
+  aliases: Map<string, string>
 ): AttributeUse | undefined {
-  return attrs.find((a) => gatedAttributeMatches(a.rawName, ruleName, stack));
+  return attrs.find((a) => gatedAttributeMatches(a.rawName, ruleName, stack, aliases));
 }
 
 function hasSerializationAttribute(attrs: AttributeUse[]): boolean {
@@ -979,7 +1008,8 @@ function processClass(
   seenNodes: Set<string>,
   seenRefs: Set<string>,
   cls: ClassBlock,
-  originalContent: string
+  originalContent: string,
+  aliases: Map<string, string>
 ): void {
   const methods = parseMethods(cls, originalContent);
   const fields = parseFields(cls, originalContent);
@@ -1064,7 +1094,7 @@ function processClass(
       for (const method of methods) {
         if (!method.canEmit) continue;
         for (const rule of stack.methodAttributes) {
-          const attr = findGatedAttribute(method.attributes, rule.attribute, stack);
+          const attr = findGatedAttribute(method.attributes, rule.attribute, stack, aliases);
           if (!attr) continue;
           if (rule.requiresStatic && !method.isStatic) continue;
           if (rule.requiresInstance && method.isStatic) continue;
@@ -1095,7 +1125,7 @@ function processClass(
       if (!stack.hostBases.has(cls.hostBase)) continue;
       for (const field of fields) {
         if (field.isStatic) continue;
-        const attr = findGatedAttribute(field.attributes, stack.syncVarAttribute, stack);
+        const attr = findGatedAttribute(field.attributes, stack.syncVarAttribute, stack, aliases);
         if (!attr) continue;
         const fieldRefs = [`${FIELD_REF_PREFIX}${cls.name}.${field.name}`];
         const typeRef = localTypeRefName(field.typeName);
@@ -1118,7 +1148,7 @@ function processClass(
         const hookAttr =
           stack.syncVarHookAttribute === stack.syncVarAttribute
             ? attr
-            : findGatedAttribute(field.attributes, stack.syncVarHookAttribute, stack);
+            : findGatedAttribute(field.attributes, stack.syncVarHookAttribute, stack, aliases);
         if (!hookAttr) continue;
         const hookRaw = namedArgValue(hookAttr.args, stack.syncVarHookArg);
         if (hookRaw === null) continue;
@@ -1300,9 +1330,9 @@ export const unityResolver: FrameworkResolver = {
     const result: FrameworkExtractionResult = { nodes: [], references: [] };
     const seenNodes = new Set<string>();
     const seenRefs = new Set<string>();
-    const { classes } = parseClassBlocks(content, filePath);
+    const { classes, aliases } = parseClassBlocks(content, filePath);
     for (const cls of classes) {
-      processClass(result, seenNodes, seenRefs, cls, content);
+      processClass(result, seenNodes, seenRefs, cls, content, aliases);
     }
     return result;
   },
