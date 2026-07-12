@@ -1923,6 +1923,32 @@ namespace B { class Widget : NetworkBehaviour { public override void OnStartClie
       );
     });
 
+    it('collapses IDENTICAL members of a duplicated class name to the first declaration (SHOULD-FIX 5)', () => {
+      // Node names are namespace-free by resolver-wide design, so two same-named classes whose
+      // members ALSO share names collapse to one row at the first block's line. Documented bound:
+      // a directly-proven second declaration with identical member names is not separately
+      // represented (it is not a fabricated edge — the row is real, just deduplicated).
+      const result = extract(`
+using Mirror;
+namespace A { class Widget : NetworkBehaviour { public void OnStartServer() {} [Command] void Cmd() {} } }
+namespace B { class Widget : NetworkBehaviour { public void OnStartServer() {} [Command] void Cmd() {} } }
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Widget.OnStartServer',
+          'UNITY attribute Command Widget.Cmd',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Widget.OnStartServer',
+          'references:unity:method:Widget.Cmd',
+        ].sort()
+      );
+      const host = result.nodes.find((n) => n.name.includes('OnStartServer'))!;
+      expect(host.startLine).toBe(3);
+    });
+
     // --- BLOCKING 1 (round 3): only a BARE-written base may drive same-file chain propagation ---
 
     it('does not chain a dotted external base into an unrelated local Mirror Root', () => {

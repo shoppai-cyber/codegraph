@@ -188,14 +188,48 @@ change, all FishNet tests green) and a **gate-hardening pass** (F1–F4 below).
 - **F4** — the host-base loader filters documentation-only keys (`note`, `detection`) out of each
   stack's host-base rule set, so a doc key can't be read as a host base.
 
+## r3 — post-review conservative pass (adversarial re-review round 3)
+
+Round 3 rejected the round-2 fixes as unsafe as a set: two residual false edges and two
+regressions the round-2 fixes introduced. All four are closed by narrowing scope, never widening
+it — when C# scope can't be modeled cheaply, emit nothing and document the bound.
+
+- **Chain propagation only through bare-written bases.** A dotted external base (`Other.Root`) was
+  shortened to its last segment before the same-file name-chain lookup, so it inherited an unrelated
+  local `Root`'s networking ownership. Now a base drives the chain only when its full form carries no
+  dot; owning fully-qualified bases (`Mirror.NetworkBehaviour`) are still admitted directly. Missed
+  edge: a genuine same-file chain written through a dotted alias is not followed.
+- **Partial classes merge; nested classes never participate.** The round-2 flat class-name count
+  treated valid `partial` blocks and nested/top-level name reuse as ambiguous and dropped classes
+  that chained through them. All-partial blocks of a name are one compiler type (merged, ambiguous
+  only on conflicting direct evidence); a class declared inside another class body is excluded from
+  the top-level name map entirely. Genuine multi-namespace duplicates stay ambiguous.
+- **Angle-aware initializer scan.** The field scanner balanced only `()[]{}`, so a generic
+  constructor comma (`new Dictionary<int,string>()`) was read as a declarator separator and the field
+  was dropped. It now tracks angle-bracket depth; a top-level `;` reached with an open angle context
+  (a comparison operator such as `a < b`) bails the whole declaration. Missed edge: initializers whose
+  `<`/`>` are comparison operators are skipped.
+- **Attribute aliases KILL; attribute-owner namespaces are their own list.** Using-alias directives
+  are parsed token-wise anywhere in the file; if any alias binds a gated attribute token's name (with
+  or without the `Attribute` suffix), bare `[ThatToken]` is rejected file-wide — no target resolution,
+  including an owning-stack target (a documented missed edge; a qualified `[Mirror.Command]` still
+  emits). Qualified spellings validate against a dedicated `attributeNamespaces` list (Mirror →
+  `Mirror`; FishNet → `FishNet.Object`), not the gate prefixes, so `[FishNet.ServerRpc]` (a custom
+  attribute) no longer emits while `[FishNet.Object.ServerRpc]` still does.
+- **Known bound — duplicated-name direct-emission collapse (SHOULD-FIX 5).** Node names are
+  namespace-free by resolver-wide design, so two same-named classes whose members ALSO share names
+  collapse to a single row at the first declaration's line. The row is real (not a fabricated edge);
+  the second directly-proven declaration is simply not separately represented. Pinned by a regression
+  test.
+
 ## Verification
 
-- `npx vitest run __tests__/unity.test.ts`: **114 passed / 114**. Per describe block (sums to 114):
-  1 top-level + 12 host-base/lifecycle + 15 fields/attributes/strings + 15 FishNet + 6 gate-hardening
-  (F1–F4) + 61 Mirror + 4 detect/claimsReference/resolve. No pre-existing FishNet or Tier-1 assertion
-  was weakened or removed — the round-2 additions (+2 Tier-1 field-scanner, +2 FishNet
-  attribute-provenance, +13 Mirror) only add cases. (Round 1 was 97; the round-2 hardening for the
-  adversarial re-review added 17.)
+- `npx vitest run __tests__/unity.test.ts`: **129 passed / 129**. Per describe block (sums to 129):
+  1 top-level + 12 host-base/lifecycle + 16 fields/attributes/strings + 16 FishNet + 6 gate-hardening
+  (F1–F4) + 74 Mirror + 4 detect/claimsReference/resolve. No pre-existing FishNet or Tier-1 assertion
+  was weakened or removed — the round-3 additions only add cases, except one round-2 alias test whose
+  asserted behavior the KILL rule deliberately reverses (an owning-stack alias now kills bare
+  `[Command]`). (Round 1 was 97; round 2 added 17 to 114; round 3 added 15 to 129.)
 - `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**.
 - **Corpus verification (Mirror 96.10.3, `mirror_docs.sqlite`): ZERO corrections.** All 12 host
   callbacks, `NetworkBehaviour : MonoBehaviour`, the 3 RPC + guard + editor attribute classes,
