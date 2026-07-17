@@ -246,7 +246,9 @@ poisons the bare-name chain (or kills the bare token) on ambiguity.
   map now resolves a name only when it has exactly one distinct binding file-wide; a namespace-scoped
   alias rebound differently in another namespace is ambiguous and left unresolved, so it can never
   last-wins a class onto a foreign owning base. Missed edge: a legitimately scoped alias is not
-  followed either.
+  followed either. (Superseded in r6: resolution is now positional and namespace-scoped — exactly one
+  distinct *active, visible* target at the use site — which keeps this guarantee while restoring
+  legitimately scoped aliases.)
 - **Locally-declared types shadow bare gated tokens (BLOCKING 5).** A bare `: NetworkBehaviour` or
   `[Command]` is suppressed when the file locally declares a type of that name (`class NetworkBehaviour
   {}`, `class CommandAttribute {}`) — C# binds the bare token to the local type, not the framework's,
@@ -261,21 +263,59 @@ poisons the bare-name chain (or kills the bare token) on ambiguity.
 - **Base-less sibling partial blocks are classified (SHOULD-FIX 1).** A base-less block of a merged
   all-partial type inherits the merged host descriptor, so members declared in a sibling block that
   lacks the base clause are live.
-- **Known bound — inactive-`#if` alias KILL (CONSIDER 1).** The masked source does not evaluate
-  preprocessor conditions, so a `using` alias inside `#if false` still enters the KILL set and can
-  suppress a live bare `[Command]` elsewhere. Consistent with the file-wide no-scope strategy; errs
-  toward silence.
+- **Known bound — inactive-`#if` alias KILL (CONSIDER 1).** *(Resolved in r6.)* The masked source now
+  evaluates preprocessor conditions: provably-inactive regions are blanked before alias parsing, so a
+  `using` alias inside `#if false` no longer enters the KILL set. An alias under an *unknown* symbol
+  (`#if SOME_DEFINE`) still kills — potentially-active text errs toward silence.
+
+## r6 — scope & preprocessor correctness (adversarial re-review round 5, graduation)
+
+Round 5 rejected the r5 state (tip `c113cfa`, 178 green tests) on three fabrication families:
+alias-parser fallback (B1), namespace-scoped alias leakage (B2), and preprocessor-blind gating (B3).
+All three reproduced by executable probe at the tip; 18 regression tests added first (12 red),
+then fixed. Direction unchanged: uncertain identity or scope → emit nothing.
+
+- **Unresolvable alias targets kill their bare token (B1).** The alias parser drops `global::` and
+  extern-`::` targets it cannot positively resolve; previously the bare LHS token then fell through
+  to gated/Tier-1 classification (`using NetworkBehaviour = global::Foreign.Net.NetworkBehaviour;`
+  fabricated a Mirror host). Alias-bound LHS names now shadow the bare token in host classification
+  (both gated and Tier-1 branches) and poison the same-file base chain. A bare survivor of alias
+  resolution means C# binds it to the alias, not the framework — so it emits nothing. A resolvable
+  same-scope alias (`using NB = Mirror.NetworkBehaviour;`) still expands and emits.
+- **Alias resolution is positional and namespace-scoped (B2).** Alias declarations record their
+  innermost enclosing namespace span; a use site resolves only against aliases whose span contains
+  it, requiring exactly one distinct active visible target. An alias declared in `namespace A` no
+  longer binds a base in `namespace B` (file-wide application fabricated cross-namespace ownership).
+  Block-scoped and file-scoped (`namespace X;`) forms covered; same-scope controls unchanged.
+- **Preprocessor-aware gating with asymmetric semantics (B3).** A three-state line analysis
+  (active / unknown / inactive) evaluates `#if`/`#elif`/`#else`/`#endif` with a deliberately tiny
+  provability model: literals, `!`, parentheses, and in-file `#define`/`#undef` (a define under an
+  unknown region taints its symbol). Gate **evidence** requires provably-active text — `using
+  Mirror;` inside `#if false` or under an unknown build symbol (`#if UNITY_SERVER`) opens nothing.
+  Gate **exclusion** fires from potentially-active text (active + unknown) — a competing stack's
+  `using` under an unknown region still closes the gate. Provably-inactive regions and directive
+  lines are blanked (offset-preserving) before all parsing, so inactive text can no longer feed
+  aliases, kills, or FQ-base evidence; the `#else` of `#if false` is correctly active. Both
+  asymmetry directions favor emit-nothing.
 
 ## Verification
 
-- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **178 passed / 178**
-  (unity.test.ts 142, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
+- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **196 passed / 196**
+  (unity.test.ts 160, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
   and SHOULD-FIX) and rewrote two tests whose fixtures were invalid C# or documented the pre-fix bug:
   the same-named-struct case now asserts the poison (emit nothing), and the base-less-partial case now
-  asserts the sibling block's members are live. (Round 1 was 97; round 2 → 114; round 3 → 131 for
-  unity.test.ts; round 4 → 142.)
-- `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**.
+  asserts the sibling block's members are live. Round 5 added 18 B1/B2/B3 regression cases (12 red at
+  tip `c113cfa`). (Round 1 was 97; round 2 → 114; round 3 → 131 for unity.test.ts; round 4 → 142;
+  round 5 → 160.) `__tests__/blender.test.ts`: **32 passed / 32** (control, no regression).
+- `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**. Built-`dist/` probe: all B1/B2/B3
+  fabrication cases emit nothing; all controls emit (source/dist parity).
 - **Corpus verification (Mirror 96.10.3, `mirror_docs.sqlite`): ZERO corrections.** All 12 host
   callbacks, `NetworkBehaviour : MonoBehaviour`, the 3 RPC + guard + editor attribute classes,
   `SyncVarAttribute.hook`, the deferred host-base virtual counts, and the SyncObject Action-callback
   surfaces match the JSON exactly. Weaver `FindHookMethod`/`ProcessSyncVar` signatures confirmed.
+- **Source verification (Mirror v96.11.0, official tag @ `370582a36f6f2cac05669634b924c3da3cab7ac4`):
+  ZERO corrections.** Every consumed rule re-verified against the release source — 12 host-invoked
+  virtuals (no additions), the exact 12-attribute universe, Weaver static-SyncVar rejection,
+  same-declaring-type `FindHookMethod`, and conditional `SerializeSyncVars`/`DeserializeSyncVars`
+  generation all hold; the release's `NetworkTime` breaking change touches no consumed row. Full
+  record: `docs/validation/mirror-resolver-v96.11.0.md`.
