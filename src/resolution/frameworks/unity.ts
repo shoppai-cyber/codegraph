@@ -471,11 +471,14 @@ function maskCSharpLiterals(content: string): { code: string; text: string } | n
     while (k < n && chars[k] !== '\n' && chars[k] !== '\r') k++;
     return k;
   };
+  // C# whitespace is more than space/tab (\f, \v, Unicode Zs all count before a directive `#`
+  // — compiler-receipted, round 10 FormFeedIf/FormFeedRegion).
+  const isInlineWs = (ch: string): boolean => ch !== '\n' && ch !== '\r' && /\s/.test(ch);
   const atLineStart = (index: number): boolean => {
     for (let k = index - 1; k >= 0; k--) {
-      const c = chars[k];
+      const c = chars[k]!;
       if (c === '\n' || c === '\r') return true;
-      if (c !== ' ' && c !== '\t') return false;
+      if (!isInlineWs(c)) return false;
     }
     return true;
   };
@@ -571,30 +574,99 @@ function maskCSharpLiterals(content: string): { code: string; text: string } | n
     if (verbatim && dollars > 1) return null; // multiple $ is raw-only; @$$"…" cannot compile
     const quotes = runLength(k, '"');
     if (!verbatim && quotes >= 3) {
-      // Raw string literal: the opening run is the fence. Content may hold shorter quote runs;
-      // with a `$` prefix, holes open with exactly `dollars` braces (a longer brace run cannot
-      // compile in a raw form, so it is unsound to guess past one).
+      // C# 11 raw string literal. The opening run is the fence; the CLOSING run must be exactly
+      // the fence — a longer run cannot compile (CS8998). Two layout grammars (all rules below
+      // compiler-receipted, round 10):
+      //   single-line — content follows the fence on the opening line and must close on it
+      //                 (a newline first is CS8997);
+      //   multiline  — only whitespace may follow the opening fence; the closing fence sits on
+      //                its own line (CS9000, including a hole ending on that line) and its
+      //                whitespace prefix must lead every content line (CS8999; same whitespace
+      //                KIND — CS9003). Whitespace-only lines may stop short of the prefix, and
+      //                lines that START inside an interpolation hole are exempt.
+      // With a `$` prefix, opening brace runs group inside-out: runs shorter than the dollar
+      // count are content, runs of dollars..2*dollars-1 open a hole (the outer braces are
+      // content), and longer runs cannot compile (CS9006). A closing-brace run in CONTENT at or
+      // above the dollar count cannot compile either (CS9007) — `lexHole` consumes exactly
+      // `dollars` closing braces, so a legal N..2N-1 closing run leaves a shorter-than-dollars
+      // remainder here.
       const fence = quotes;
       let pos = k + fence;
+      while (pos < n && isInlineWs(chars[pos]!)) pos++;
+      const multiline = pos < n && (chars[pos] === '\n' || chars[pos] === '\r');
+      const contentLineStarts: number[] = [];
+      if (multiline) {
+        if (chars[pos] === '\r' && chars[pos + 1] === '\n') pos += 2;
+        else pos++;
+        contentLineStarts.push(pos);
+      } else {
+        pos = k + fence; // the whitespace we skipped is single-line content
+      }
       while (pos < n) {
-        if (chars[pos] === '"') {
+        const c = chars[pos]!;
+        if (c === '"') {
           const run = runLength(pos, '"');
-          if (run >= fence) {
-            blank(start, pos + run);
-            return pos + run;
-          }
-          pos += run;
-          continue;
-        }
-        if (dollars > 0 && chars[pos] === '{') {
-          const run = runLength(pos, '{');
-          if (run > dollars) return null;
-          if (run === dollars) {
-            const end = lexHole(pos + dollars, dollars, nesting + 1);
-            if (end === null) return null;
-            pos = end;
+          if (run > fence) return null; // CS8998 — more quotes than the fence permits
+          if (run < fence) {
+            pos += run;
             continue;
           }
+          if (multiline) {
+            // Closing fence must be alone on its line (CS9000). Anything non-whitespace
+            // between the line start and the fence — content or a hole's tail — cannot compile.
+            let ls = pos;
+            while (ls > 0 && chars[ls - 1] !== '\n' && chars[ls - 1] !== '\r') ls--;
+            for (let t = ls; t < pos; t++) {
+              if (!isInlineWs(chars[t]!)) return null; // CS9000
+            }
+            const closePrefix = chars.slice(ls, pos).join('');
+            // Indentation: every line that STARTS in content must begin with the closing
+            // prefix; whitespace-only lines may be any prefix-consistent shorter run.
+            for (const lineStart of contentLineStarts) {
+              if (lineStart === ls) continue; // the closing line itself
+              let t = lineStart;
+              while (t < n && isInlineWs(chars[t]!)) t++;
+              const prefix = chars.slice(lineStart, t).join('');
+              const wsOnly = t >= n || chars[t] === '\n' || chars[t] === '\r';
+              if (wsOnly) {
+                if (!prefix.startsWith(closePrefix) && !closePrefix.startsWith(prefix)) {
+                  return null; // CS9003 — mismatched whitespace kind
+                }
+              } else if (!prefix.startsWith(closePrefix)) {
+                return null; // CS8999 — content line not led by the closing whitespace
+              }
+            }
+          }
+          blank(start, pos + fence);
+          return pos + fence;
+        }
+        if (c === '\n' || c === '\r') {
+          if (!multiline) return null; // CS8997 — single-line form cannot span lines
+          if (c === '\r' && chars[pos + 1] === '\n') pos += 2;
+          else pos++;
+          contentLineStarts.push(pos);
+          continue;
+        }
+        if (dollars > 0 && c === '{') {
+          const run = runLength(pos, '{');
+          if (run < dollars) {
+            pos += run;
+            continue;
+          }
+          if (run >= dollars * 2) return null; // CS9006 — too many opening braces
+          const end = lexHole(pos + run, dollars, nesting + 1);
+          if (end === null) return null;
+          if (!multiline) {
+            for (let t = pos; t < end; t++) {
+              if (chars[t] === '\n' || chars[t] === '\r') return null; // CS8997
+            }
+          }
+          pos = end;
+          continue;
+        }
+        if (dollars > 0 && c === '}') {
+          const run = runLength(pos, '}');
+          if (run >= dollars) return null; // CS9007 — unmatched closing run in content
           pos += run;
           continue;
         }
@@ -635,9 +707,12 @@ function maskCSharpLiterals(content: string): { code: string; text: string } | n
         pos = end;
         continue;
       }
-      if (dollars === 1 && c === '}' && chars[pos + 1] === '}') {
-        pos += 2;
-        continue;
+      if (dollars === 1 && c === '}') {
+        if (chars[pos + 1] === '}') {
+          pos += 2;
+          continue;
+        }
+        return null; // CS8086 — a lone `}` in interpolated content cannot compile
       }
       pos++;
     }
@@ -648,6 +723,46 @@ function maskCSharpLiterals(content: string): { code: string; text: string } | n
   // `#error`, `#pragma`, `#line`, `#nullable`, …) carries freeform text: blanked past the
   // keyword in BOTH views so it can never desynchronize a later pass or feed a string reader.
   const PP_KEEP = new Set(['if', 'elif', 'else', 'endif', 'define', 'undef']);
+  // Conditional directives change region state; they are the only lines kept intact inside a
+  // provably-inactive region (analyzePreprocessor must see the same structure we tracked here).
+  const CONDITIONAL = new Set(['if', 'elif', 'else', 'endif']);
+  // This lexer needs its own region tracking (in addition to analyzePreprocessor's) because
+  // excluded text is NOT compiled: an unterminated string inside `#if false` is legal C#
+  // (round-10 PPDeadUnterminatedString/RawFence receipts), so the lexer must skip such regions
+  // entirely instead of failing on them. Both passes run the same tracker, so states agree.
+  const tracker = createPpTracker();
+
+  // Lex one directive line starting at the `#` (which is at line start). Kept directives get
+  // their trailing `//` comment blanked in BOTH views (a comment is a comment even here — and
+  // an odd quote inside one must never reach maskStringLiterals: round-10 PP02/07-11) and their
+  // condition fed to the tracker. Quotes or block comments in a kept directive's tail cannot
+  // compile (CS1025 — only `//` comments may follow a directive): suppress the file.
+  // Returns the end-of-line offset, or null to suppress.
+  const lexDirectiveLine = (start: number): number | null => {
+    let k = start + 1;
+    while (k < n && isInlineWs(chars[k]!)) k++;
+    const wordStart = k;
+    while (k < n && /[a-z]/.test(chars[k]!)) k++;
+    const keyword = chars.slice(wordStart, k).join('');
+    const end = skipLine(start);
+    if (!PP_KEEP.has(keyword)) {
+      blankBoth(k, end);
+      return end;
+    }
+    let restEnd = end;
+    for (let t = k; t < end; t++) {
+      const ch = chars[t]!;
+      if (ch === '/' && chars[t + 1] === '/') {
+        blankBoth(t, end);
+        restEnd = t;
+        break;
+      }
+      if (ch === '/' && chars[t + 1] === '*') return null; // CS1025
+      if (ch === '"' || ch === "'") return null; // CS1025
+    }
+    tracker.handle(keyword, chars.slice(k, restEnd).join(''));
+    return end;
+  };
 
   for (let i = 0; i < n; ) {
     const c = chars[i];
@@ -669,14 +784,35 @@ function maskCSharpLiterals(content: string): { code: string; text: string } | n
       continue;
     }
     if (c === '#' && atLineStart(i)) {
-      let k = i + 1;
-      while (k < n && (chars[k] === ' ' || chars[k] === '\t')) k++;
-      const wordStart = k;
-      while (k < n && /[a-z]/.test(chars[k]!)) k++;
-      const keyword = chars.slice(wordStart, k).join('');
-      const end = skipLine(i);
-      if (!PP_KEEP.has(keyword)) blankBoth(k, end);
-      i = end;
+      const dirEnd = lexDirectiveLine(i);
+      if (dirEnd === null) return null;
+      i = dirEnd;
+      // Provably-inactive region: its text is never compiled, so it must not be lexed at all —
+      // blank every line in BOTH views. Only nested conditional directives are kept intact
+      // (and fed to the tracker) so analyzePreprocessor later derives the same region states.
+      while (tracker.cur() === 'inactive' && i < n) {
+        if (chars[i] === '\r' && chars[i + 1] === '\n') i += 2;
+        else if (chars[i] === '\n' || chars[i] === '\r') i++;
+        if (i >= n) break;
+        const lineStart = i;
+        let t = i;
+        while (t < n && isInlineWs(chars[t]!)) t++;
+        if (t < n && chars[t] === '#') {
+          let k = t + 1;
+          while (k < n && isInlineWs(chars[k]!)) k++;
+          const wordStart = k;
+          while (k < n && /[a-z]/.test(chars[k]!)) k++;
+          if (CONDITIONAL.has(chars.slice(wordStart, k).join(''))) {
+            const nested = lexDirectiveLine(t);
+            if (nested === null) return null;
+            i = nested;
+            continue;
+          }
+        }
+        const eol = skipLine(lineStart);
+        blankBoth(lineStart, eol);
+        i = eol;
+      }
       continue;
     }
     if (c === "'") {
@@ -760,11 +896,41 @@ interface PreprocessorAnalysis {
   stateAt(index: number): PpState;
 }
 
-function analyzePreprocessor(masked: string): PreprocessorAnalysis {
-  const lines = masked.split('\n');
+interface PpTracker {
+  /** Feed one directive (keyword + raw condition/symbol tail). Non-state keywords are ignored. */
+  handle(kw: string, rest: string): void;
+  /** Region state after the directives fed so far. */
+  cur(): PpState;
+}
+
+// Shared conditional-compilation tracker. maskCSharpLiterals uses it to know when a region is
+// provably inactive (excluded text is never compiled, so it must not be lexed at all), and
+// analyzePreprocessor uses the same logic for the parse/evidence texts. Both passes MUST agree
+// on region states or the views desynchronize.
+function createPpTracker(): PpTracker {
   const defined = new Set<string>();
   const undefd = new Set<string>();
   const tainted = new Set<string>();
+
+  // Split at top-level occurrences of a two-char operator, respecting parentheses.
+  const splitTop = (e: string, op: string): string[] | null => {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < e.length - 1; i++) {
+      const c = e[i]!;
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+      else if (depth === 0 && c === op[0] && e[i + 1] === op[1]) {
+        parts.push(e.slice(start, i));
+        start = i + 2;
+        i++;
+      }
+    }
+    if (parts.length === 0) return null;
+    parts.push(e.slice(start));
+    return parts;
+  };
 
   const evalExpr = (raw: string): PpTri => {
     let e = raw.trim();
@@ -785,6 +951,30 @@ function analyzePreprocessor(masked: string): PreprocessorAnalysis {
       }
       if (!wraps || depth !== 0) break;
       e = e.slice(1, -1).trim();
+    }
+    // Tri-state fold across top-level `||` (binds loosest, so it splits first) then `&&`: one
+    // provably-true disjunct / provably-false conjunct decides the whole expression even when a
+    // sibling is unknown — `#if false && SYMBOL` is provably false (round-10 PPCompoundFalse /
+    // PPCompoundTrueOr receipts). Undecidable operands keep the whole expression unknown.
+    const orParts = splitTop(e, '||');
+    if (orParts) {
+      let sawUnknown = false;
+      for (const part of orParts) {
+        const v = evalExpr(part);
+        if (v === 'true') return 'true';
+        if (v === 'unknown') sawUnknown = true;
+      }
+      return sawUnknown ? 'unknown' : 'false';
+    }
+    const andParts = splitTop(e, '&&');
+    if (andParts) {
+      let sawUnknown = false;
+      for (const part of andParts) {
+        const v = evalExpr(part);
+        if (v === 'false') return 'false';
+        if (v === 'unknown') sawUnknown = true;
+      }
+      return sawUnknown ? 'unknown' : 'true';
     }
     if (e === 'true') return 'true';
     if (e === 'false') return 'false';
@@ -816,17 +1006,7 @@ function analyzePreprocessor(masked: string): PreprocessorAnalysis {
     return parent;
   };
 
-  // Per line: 'directive' lines are blanked everywhere; other lines carry their region state.
-  const lineKinds: Array<PpState | 'directive'> = [];
-  for (const rawLine of lines) {
-    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-    const m = /^\s*#\s*([A-Za-z]\w*)(.*)$/.exec(line);
-    if (!m) {
-      lineKinds.push(cur());
-      continue;
-    }
-    const kw = m[1]!;
-    const rest = m[2] ?? '';
+  const handle = (kw: string, rest: string): void => {
     if (kw === 'if') {
       const parent = cur();
       const cond = evalExpr(rest);
@@ -874,7 +1054,27 @@ function analyzePreprocessor(masked: string): PreprocessorAnalysis {
         }
       }
     }
+    // #region/#endregion/#pragma/#nullable/#line/#error/#warning: no state change.
+  };
+
+  return { handle, cur };
+}
+
+function analyzePreprocessor(masked: string): PreprocessorAnalysis {
+  const lines = masked.split('\n');
+  const tracker = createPpTracker();
+
+  // Per line: 'directive' lines are blanked everywhere; other lines carry their region state.
+  const lineKinds: Array<PpState | 'directive'> = [];
+  for (const rawLine of lines) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    const m = /^\s*#\s*([A-Za-z]\w*)(.*)$/.exec(line);
+    if (!m) {
+      lineKinds.push(tracker.cur());
+      continue;
+    }
     // #region/#endregion/#pragma/#nullable/#line/#error/#warning: no state change, line blanked.
+    tracker.handle(m[1]!, m[2] ?? '');
     lineKinds.push('directive');
   }
 
@@ -978,7 +1178,20 @@ function resolveBaseFull(
   // Cf-carrying spelling denote the same C# name as the plain form, at a base USE site exactly
   // as at a declaration site. (`::`-qualified segments pass through untouched and simply fail
   // the downstream host lookups — the conservative direction.)
-  let value = stripGenericSuffix(base.trim())
+  //
+  // Round 10 (GLM F-LOW-1): a segment whose first character (after an optional `@`) is a Cf
+  // format char is NOT a legal C# identifier — the identifier START class is [\p{L}\p{Nl}_],
+  // which excludes Cf; only identifier-PART positions admit it. Every other canonicalization
+  // site is regex-gated by CS_ID/CS_QID (whose start class enforces this), but base text here
+  // arrives from the class-declaration scan ungated — so stripping the Cf would canonicalize an
+  // uncompilable spelling onto a real name and emit on it. Return the trimmed original instead:
+  // the retained Cf fails every downstream lookup, i.e. suppression.
+  const trimmed = stripGenericSuffix(base.trim());
+  for (const segment of trimmed.split('.')) {
+    const bare = segment.trim().replace(/^@/, '');
+    if (/^\p{Cf}/u.test(bare)) return base.trim();
+  }
+  let value = trimmed
     .split('.')
     .map((segment) => canonicalIdName(segment.trim()))
     .join('.');

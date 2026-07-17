@@ -404,10 +404,71 @@ method bodies, interpolation-hole contents) are OUTSIDE scanner scope: a regex s
 verify whole-file compilability, and rows from such files are not fabrications provided the
 identity/scope reasoning for the row itself is sound.
 
+## r10 — directive-line lexing, excluded-region skipping, raw-string layout grammar (adversarial re-review round 9, partitioned panel)
+
+Round 9 ran as a partitioned three-reviewer panel on commit `4e4d4bc` (Codex sol-xhigh on the
+lexer, GLM on identity/scope, Opus on the preprocessor). Codex and Opus REJECTED; GLM raised one
+LOW identity finding. Every fix below was legality-receipted with dotnet 10.0.301 / C# 12 before
+implementation (a 15-case `-p:Case=` compiler harness, extending Codex's round-9 pattern), and
+every fix landed with red-first regression tests in `__tests__/unity-round10.test.ts` (31 cases,
+22 red at `4e4d4bc`):
+
+1. **Kept-directive tails were never comment-lexed** (Codex F1, CRITICAL — subsumes Opus F1;
+   fixtures PP02/03/07–11). `#if false // note` reached the condition evaluator with the comment
+   attached → 'unknown' instead of false → a provably-dead region stayed in the parse text —
+   fabrication; and an odd quote inside a kept directive's `//` comment desynchronized
+   `maskStringLiterals` — legal-file suppression. `lexDirectiveLine` now lexes every kept
+   directive's tail: `//` comments are blanked in both views before the condition is tracked,
+   and a quote or block comment in the tail (CS1025 — only `//` may follow a directive)
+   suppresses the file.
+2. **Excluded regions were still lexed** (Opus F2; receipts PPDeadUnterminatedString/RawFence).
+   An unterminated literal inside `#if false` is legal C# (excluded text is never compiled) but
+   nulled the lexer — legal-file suppression. The lexer now runs its own `createPpTracker` (the
+   same tracker `analyzePreprocessor` uses, so region states always agree) and BLANKS provably
+   inactive regions line-by-line without lexing them, keeping only nested conditional directives
+   intact for state tracking.
+3. **Compound `#if` conditions were always 'unknown'** (Opus advisory; receipts
+   PPCompoundFalse/PPCompoundTrueOr). `#if false && ANYTHING` is provably false. The condition
+   evaluator now folds top-level `||`/`&&` tri-state: one provably-true disjunct or
+   provably-false conjunct decides the expression; undecidable operands keep it unknown.
+4. **Raw interpolation brace-run grouping was wrong in both directions** (Codex F2/F4; fixtures
+   IR03–05, IR10/11, IN09). Legal opening runs of N+1..2N−1 braces (outer braces are content,
+   innermost N open the hole) were nulled — suppression; runs ≥ 2N (CS9006), unmatched closing
+   runs ≥ N in content (CS9007), and a lone `}` in normal interpolation (CS8086) were accepted —
+   emission from uncompilable source. All four boundaries now match the receipted grammar.
+5. **Raw-string layout was not validated** (Codex F3; fixtures R08–R12). The old scanner
+   accepted any closing run ≥ fence anywhere. The rewrite distinguishes single-line form
+   (content on the fence line; a newline before the close is CS8997) from multiline form
+   (closing fence alone on its own line — CS9000, including a hole ending on that line; every
+   content line led by the closing fence's whitespace prefix — CS8999; whitespace-only lines
+   may stop short but must agree in KIND — CS9003; overlong close runs are CS8998; lines
+   starting inside an interpolation hole are exempt — all receipted, including the exemptions).
+6. **Leading-Cf base tokens were canonicalized onto real names** (GLM F-LOW-1). A base-clause
+   segment starting with a Cf char (e.g. ZWJ) is not a legal identifier (the START class
+   [\p{L}\p{Nl}_] excludes Cf) but `resolveBaseFull` stripped the Cf and resolved the residual name —
+   identity-unsound emission. The one ungated canonicalization site now rejects leading-Cf
+   segments (the retained Cf fails every downstream lookup → suppression); interior Cf still
+   canonicalizes (round-8 identity preserved).
+7. **`#` after form-feed/VT was not a directive to the lexer** (Opus advisory; receipts
+   FormFeedIf/FormFeedRegion). `atLineStart` accepted only space/tab while
+   `analyzePreprocessor`'s `^\s*#` accepted any whitespace — desync (an unblanked freeform tail
+   could reach later passes). The lexer now treats every non-newline whitespace char as line-
+   leading, matching the compiler.
+
+One legacy fixture updated: the round-6 GLM-F1 desync test opened its raw string with content on
+the fence line and then spanned lines — single-line form crossing a newline is CS8997-illegal,
+which r10 now correctly suppresses; the fixture's content moved below the fence (same desync
+scenario, legal spelling). Known stale expectations in frozen reviewer probe suites (fixtures
+kept verbatim for provenance): Codex round-9 PP04 (`#if false /* c */` — Codex's own review
+corrected this to CS1025-illegal, so suppression is right), round-5 P6 (`#if true && true` —
+now provably true by design, active `using Mirror;` correctly emits), GLM F-RG-19 (alias-only
+gate evidence — documented coverage bound, a miss not a fabrication).
+
 ## Verification
 
-- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **248 passed / 248**
-  (unity.test.ts 212, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
+- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts __tests__/unity-round10.test.ts`:
+  **279 passed / 279** (unity.test.ts 212, unity-assets.test.ts 36, unity-round10.test.ts 31 — the
+  round-10 suite: 22 red at `4e4d4bc`, all green post-fix). Round 4 added 11 Mirror-gated cases (one per BLOCKING
   and SHOULD-FIX) and rewrote two tests whose fixtures were invalid C# or documented the pre-fix bug:
   the same-named-struct case now asserts the poison (emit nothing), and the base-less-partial case now
   asserts the sibling block's members are live. Round 5 added 18 B1/B2/B3 regression cases (12 red at

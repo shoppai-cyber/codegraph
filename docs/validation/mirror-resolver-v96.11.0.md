@@ -286,6 +286,58 @@ this corpus contains **zero raw string literals** (GLM verified by grep), so it 
 the raw-string surface; that surface is pinned instead by the 18 raw-string/lexer regression
 tests and the three reviewers' probe suites rerun clean.
 
+Re-run after the round-10 fix (directive-tail lexing, excluded-region skipping, tri-state
+condition folding, raw-string layout grammar, leading-Cf base rejection): **identical result —
+924 scanned, 314 with rows, 1709 vs 1705 (+4), the same two pure-gain files
+(`UniqueNameAuthenticator.cs`, `PlayerTopDown.cs`), zero rows lost anywhere.**
+
+## Round-10 compiler receipts (dotnet SDK 10.0.301, C# 12, LangVersion 12.0)
+
+Every round-10 behavior change was legality-receipted BEFORE implementation with a `-p:Case=`
+compiler harness (net10.0, `EnableDefaultCompileItems=false`, Mirror stubs; extends the round-9
+Codex `CompilerCases.csproj` pattern). Results, verbatim:
+
+| Case | Verdict | Pins |
+|---|---|---|
+| `WsEmptyLine` | LEGAL | empty line inside a multiline raw string needs no indentation prefix |
+| `WsShortLine` | LEGAL | whitespace-only line may be SHORTER than the closing prefix (same kind) |
+| `WsTabLine` | CS9003 | whitespace-only line of a different whitespace KIND is illegal |
+| `WsContentShort` | CS8999 | content line not led by the closing whitespace prefix is illegal |
+| `RawHoleLineNoIndent` | LEGAL | a line starting inside an interpolation hole is indentation-exempt |
+| `RawHoleMultiNoIndent` | LEGAL | multiple hole-interior lines are all indentation-exempt |
+| `RawCloseAfterHole` | CS9000 | a hole ending on the closing-fence line is illegal (close must be alone) |
+| `PPDeadUnterminatedString` | LEGAL | unterminated string inside `#if false` (excluded text is not compiled) |
+| `PPDeadUnterminatedRawFence` | LEGAL | unterminated raw fence inside `#if false` |
+| `PPCompoundFalse` | LEGAL | `#if false && true` + arbitrary garbage in region — region provably dead |
+| `PPCompoundTrueOr` | LEGAL | `#if true \|\| UNDEFINED` — region provably live |
+| `FormFeedRegion` | LEGAL | form-feed before `#region` — still a directive |
+| `FormFeedIf` | LEGAL | form-feed before `#if false` — still a directive, region dead |
+| `PPIfQuoteJunk` | CS1025 | a quote in an `#if` tail is illegal (only `//` comments may follow) |
+| `PPElifChain` | LEGAL | odd-quote `//` comments on `#if`/`#elif`/`#else` chains |
+
+## Round-10 gate results (worktree, post-fix)
+
+- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts __tests__/blender.test.ts __tests__/unity-round10.test.ts`:
+  **311 passed / 311** (212 + 36 + 32 + 31; the 31 new round-10 tests were 22 red / 9 green at
+  `4e4d4bc`). `npx tsc --noEmit` exit 0; `npm run build` exit 0.
+- Probe suites (bun, src + dist, parity clean in every run):
+  - Codex round-9 67-fixture suite: **66/67, parityMismatches=0, lineMismatches=0.** The single
+    delta is PP04 (`#if false /* c */` expected EMIT) — Codex's own round-9 review corrected
+    this control to CS1025-illegal and excluded it from blockers; r10 suppresses (pinned by a
+    round-10 test). Fixture kept verbatim for provenance.
+  - Codex round-8 37-fixture suite: **unexpected=0, parityMismatches=0.**
+  - GLM round-9 25-fixture suite: **24/25, parityMismatches=0.** The single delta is F-RG-19
+    (alias-only Mirror gate evidence), which GLM's review itself classifies as a coverage-bound
+    question — a conservative miss, not a fabrication. Unchanged from round 9.
+  - Round-7 reviewer 25-fixture suite: **unexpected=0, parityMismatches=0.**
+  - Round-5 23-fixture suite: **22/23.** The single delta is P6 (`#if true && true` expected to
+    stay 'unknown') — stale by design: round-10 tri-state folding proves it TRUE (receipted),
+    so the active `using Mirror;` correctly opens the gate. A5 remains a passing advisory miss.
+  - Blocker-repro probe (B1/B2/B3): **10/10 OK.**
+- Full `npm test`: **2014 passed / 11 failed / 33 skipped** — the identical 11 pre-existing
+  Windows-environment failures recorded at the round-9 gate (JVM FQN ×3, MCP initialize ×3, MCP
+  roots ×3, MCP daemon ×2; file-locking/timing suites, none touching the resolver).
+
 ## Conservative omissions (deliberate missed edges, unchanged)
 
 Recorded in the invocation table; re-affirmed against v96.11.0 — none became unsafe:

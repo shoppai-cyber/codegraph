@@ -3251,13 +3251,16 @@ class Player : NetworkBehaviour {
     it('never fabricates when an internal quote desyncs a naive masker (GLM F1)', () => {
       // One internal " is legal raw-string content (1 < 3). The old masker consumed it as a
       // string terminator, leaking the Decoy text into the parse stream as real code.
+      // (Round 10: content must start below the opening fence — content on the fence line makes
+      // the literal single-line form, which cannot span lines (CS8997) and now suppresses.)
       const result = extract(`
 using Mirror;
 public class Player : NetworkBehaviour
 {
     public override void OnStartServer() { }
     [Command] void CmdGo() { }
-    string decoy = """x"
+    string decoy = """
+    x"
     class Decoy : NetworkBehaviour { public override void OnStartServer() { } }
     """;
 }
