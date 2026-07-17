@@ -313,16 +313,53 @@ compilation units the C# compiler rejects outright.
   is blanked before the check and never counts. The type-keyword pre-scan errs toward
   suppression (a keyword-shaped token before the declaration marks the file illegal even where
   the compiler's first error would differ) — a missed edge, never a fabricated one.
+  *(Superseded in r8: the r7 keyword/name scan itself encoded an ASCII-only identifier subset and
+  a type-keyword blacklist; escaped/Unicode identifiers and top-level statements walked past it.
+  r8 replaces it with a name-agnostic keyword scan plus a legal-prelude whitelist.)*
+
+## r8 — C# identifier grammar unification (adversarial re-review round 7)
+
+Round 7 (fresh independent Codex sol-xhigh review of the r7 state) confirmed B1/B2/B3 and the
+prior 23-fixture suite stayed closed, then REJECTED on the identifier grammar: the r7 layout
+check, the namespace-span scanner and the class scanner each encoded a different ASCII-only
+subset of C#'s identifier grammar, and every gap between those subsets was a hole. Six
+fabrication fixtures (all compiler-receipted: CS8956 ×3, CS8955 ×3) and one clear-cut legal-file
+suppression were demonstrated.
+
+- **One shared identifier grammar (`CS_ID`).** C# identifiers may carry a verbatim `@` prefix
+  (spelling, not identity: `@namespace` names the type `namespace`) and Unicode
+  letters/digits/marks. All name scanners — namespace declarations, class names, non-class type
+  names, using-alias left-hand sides — now share one grammar, and every stored name is
+  canonicalized (verbatim prefix stripped) so an escaped spelling can no longer slip past
+  shadow/kill sets (`using @NetworkBehaviour = …` kills the bare token; `interface
+  @NetworkBehaviour` shadows it) or suppress a legal class (`class @namespace :
+  NetworkBehaviour` emits — the round-7 false suppression).
+- **Name-agnostic layout classification.** Namespace declarations are found by the `namespace`
+  KEYWORD (spelling-exact — never `@namespace`, never a fragment of a longer identifier) plus
+  the following `{`/`;` delimiter, shared by the span scanner and the layout check so the two
+  can never disagree. A declaration whose name doesn't parse (`namespace {`, undecodable
+  spellings, truncated declarations) marks the file illegal — suppression, never a guess.
+- **CS8956 by whitelist, not blacklist.** The compiler allows only extern-alias directives,
+  using directives and assembly/module attribute lists before a file-scoped namespace; ANY other
+  leading construct — a type declaration in any spelling, a top-level statement, a `using (…)`
+  STATEMENT — now marks the layout illegal. The r7 blacklist could only reject spellings it
+  could parse.
+- **Unicode-escape guard.** A `\uXXXX`/`\UXXXXXXXX` escape surviving comment-strip + string-mask
+  + preprocessor-blank sits in code — a Unicode-escaped identifier the scanner cannot decode
+  (`interface N…` can declare the NAME NetworkBehaviour). Every name comparison in such a
+  file is unsound, so the whole file emits nothing. Escapes inside strings, char literals,
+  comments and inactive regions are already masked and never trigger the guard.
 
 ## Verification
 
-- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **202 passed / 202**
-  (unity.test.ts 166, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
+- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **216 passed / 216**
+  (unity.test.ts 180, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
   and SHOULD-FIX) and rewrote two tests whose fixtures were invalid C# or documented the pre-fix bug:
   the same-named-struct case now asserts the poison (emit nothing), and the base-less-partial case now
   asserts the sibling block's members are live. Round 5 added 18 B1/B2/B3 regression cases (12 red at
-  tip `c113cfa`); round 6 added 6 N1/N2 illegal-namespace-layout cases (5 red). (Round 1 was 97;
-  round 2 → 114; round 3 → 131 for unity.test.ts; round 4 → 142; round 5 → 160; round 6 → 166.)
+  tip `c113cfa`); round 6 added 6 N1/N2 illegal-namespace-layout cases (5 red); round 7 added 14
+  identifier-grammar cases (12 red). (Round 1 was 97; round 2 → 114; round 3 → 131 for unity.test.ts;
+  round 4 → 142; round 5 → 160; round 6 → 166; round 7 → 180.)
   `__tests__/blender.test.ts`: **32 passed / 32** (control, no regression).
 - `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**. Built-`dist/` probe: all B1/B2/B3
   fabrication cases emit nothing; all controls emit (source/dist parity).

@@ -123,10 +123,41 @@ unity-assets 36 + blender 32), blocker probe zero fabrications, the reviewer's o
 probe suite reruns with `unexpected=0`, and the 923-file real-project scan is unchanged (zero
 rows lost — no legal real file trips the layout check).
 
+## Round-7 findings (independent adversarial review of the round-6 state)
+
+The round-7 review (fresh Codex GPT-5.6 Sol xhigh pane, Overstory lane `r7-mirror-review`;
+artifact `ROUND7-REVIEW.md`, probes `round7-adversarial-probes.mjs` + compiler receipts, .NET SDK
+10.0.301) confirmed the blocker probe, the prior 23-fixture suite (`unexpected=0`), the targeted
+counts and source/dist parity (25/25 novel fixtures byte-equal), then returned **REJECT** on the
+identifier grammar: the round-6 layout check, the namespace-span scanner and the class scanner
+each encoded a different ASCII-only subset of C#'s identifier grammar (verbatim `@` prefixes and
+Unicode identifier characters are legal C#), and the gaps fabricated or falsely suppressed:
+
+| Finding | Shape | Compiler receipt | Direction |
+|---|---|---|---|
+| I3/I4 | `@`-escaped / Unicode type name before file-scoped namespace | CS8956 | fabrication |
+| I5 | top-level statement before file-scoped namespace | CS8956 | fabrication |
+| I6/I7/I8 | `@`-escaped / Unicode namespace name in file-scoped+block mixes | CS8955 | fabrication |
+| A1 | legal `class @namespace : NetworkBehaviour` | compiles clean | false suppression |
+
+Fixed TDD-first: 14 regression tests added (12 red before the fix — I3-I8, a `using (…)`
+statement prelude, a nameless `namespace {`, A1, an `@`-escaped alias LHS, an `@`-escaped local
+shadow, a `\uXXXX`-escaped shadow; plus 2 green controls pinning the legal prelude and
+escapes-in-strings). The fix unifies all name scanners on one shared C# identifier grammar with
+canonicalization (`@X` ≡ `X`), makes layout classification name-agnostic (keyword + delimiter;
+unparsable declaration ⇒ suppress), replaces the CS8956 type-keyword blacklist with a
+legal-prelude whitelist (extern alias / using directives / assembly-module attributes only), and
+suppresses any file carrying Unicode identifier escapes the scanner cannot decode. After the
+fix: targeted suite **248/248**, blocker probe zero fabrications, prior 23-fixture suite
+`unexpected=0`, the round-7 reviewer's own 25-fixture suite `unexpected=0 parityMismatches=0`
+(A1 emits `namespace.OnStartServer` / `namespace.Cmd`), and the Mirror-source scan shows the
+identical result (zero rows lost — no legal real file trips the whitelist or the escape guard).
+
 ## Executable evidence (exact counts)
 
-All runs on Windows (this machine), Node from repo toolchain, at commit `129723f` in the resolver
-worktree, 2026-07-16.
+All runs on Windows (this machine), Node from repo toolchain, in the resolver worktree,
+2026-07-16/17 (round-5 numbers at commit `129723f`; round-6/7 updates at the commits noted in
+their sections).
 
 ### Targeted gate
 
@@ -134,12 +165,12 @@ worktree, 2026-07-16.
 npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts __tests__/blender.test.ts
 ```
 
-- `__tests__/unity.test.ts` — **166 passed** (142 prior + 18 round-5 regression tests covering
+- `__tests__/unity.test.ts` — **180 passed** (142 prior + 18 round-5 regression tests covering
   B1×4, B2×5, B3×9 (12 red at tip `c113cfa`) + 6 round-6 tests covering N1/N2/CS8954 (5 red
-  before the round-6 fix))
+  before the round-6 fix) + 14 round-7 identifier-grammar tests (12 red before the round-7 fix))
 - `__tests__/unity-assets.test.ts` — **36 passed**
 - `__tests__/blender.test.ts` — **32 passed**
-- Total targeted: **234/234 passed, 0 failed**
+- Total targeted: **248/248 passed, 0 failed**
 
 ### Build + dist parity probe
 
@@ -152,7 +183,9 @@ expected host/Command rows. Source-tip and dist behavior match.
 
 `npm test` at `129723f`: **1931 passed | 11–12 failed | 33 skipped (2354 tests, 127 files)**.
 After the round-6 fix: **1938 passed | 10 failed | 33 skipped (2360 tests)** — the same
-pre-existing failure families, zero new.
+pre-existing failure families, zero new. After the round-7 fix: **1947 passed | 9 failed |
+33 skipped (2374 tests)** — again only the pre-existing families (JVM/Kotlin ×3,
+mcp-initialize ×3, mcp-roots ×3; the flaky daemon-lifecycle test passed this run).
 
 Every failure was re-run at the pre-change baseline (round-5 diff stashed) and reproduced there:
 
@@ -188,6 +221,11 @@ Conclusion: the round-5 suppressions cause **no regression on real code** — no
 from real-world `#if` regions or scoped aliases — and blanking directive lines *recovered* two
 genuine rows the old scanner dropped. Scan tooling: `real-project-scan.mjs` /
 `blocker-repro-probe.mjs` (fork-local, gitignored `scratch/round5-review/`).
+
+Re-run after the round-7 fix (invoked from the acquisition root one level above `Assets`, hence
+one extra scanned file): **924 scanned, 314 with rows, new 1709 vs baseline 1705 (+4)**, the same
+two pure-gain files, zero rows lost anywhere — the legal-prelude whitelist, the name-agnostic
+namespace scanner and the Unicode-escape guard suppress **no** legal real Mirror file.
 
 ## Conservative omissions (deliberate missed edges, unchanged)
 

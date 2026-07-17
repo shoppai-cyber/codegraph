@@ -730,7 +730,7 @@ function parseAliasDecls(
   stateAt: (index: number) => PpState
 ): AliasDecl[] {
   const decls: AliasDecl[] = [];
-  const regex = /\busing\s+([A-Za-z_]\w*)\s*=\s*([^;]+?)\s*;/g;
+  const regex = new RegExp(`\\busing\\s+(${CS_ID})\\s*=\\s*([^;]+?)\\s*;`, 'gu');
   let match: RegExpExecArray | null;
   while ((match = regex.exec(safe)) !== null) {
     let scopeStart = 0;
@@ -744,7 +744,7 @@ function parseAliasDecls(
       }
     }
     decls.push({
-      name: match[1]!,
+      name: canonicalIdName(match[1]!),
       target: match[2]!.replace(/\s+/g, ''),
       scopeStart,
       scopeEnd,
@@ -782,9 +782,9 @@ function makeAliasResolver(decls: AliasDecl[]): (name: string, pos: number) => s
 // without re-leaking a bare `[Command]` whose alias target was `global::Other.CommandAttribute`.
 function aliasBoundNames(content: string): Set<string> {
   const names = new Set<string>();
-  const regex = /\busing\s+([A-Za-z_]\w*)\s*=/g;
+  const regex = new RegExp(`\\busing\\s+(${CS_ID})\\s*=`, 'gu');
   let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) names.add(match[1]!);
+  while ((match = regex.exec(content)) !== null) names.add(canonicalIdName(match[1]!));
   return names;
 }
 
@@ -797,10 +797,79 @@ function aliasBoundNames(content: string): Set<string> {
 // ever a missed edge (the safe direction), never a fabrication.
 function collectNonClassTypeNames(safe: string): Set<string> {
   const names = new Set<string>();
-  const regex = /\b(?:interface|struct|enum|record(?:\s+(?:class|struct))?)\s+([A-Za-z_]\w*)/g;
+  const regex = new RegExp(`\\b(?:interface|struct|enum|record(?:\\s+(?:class|struct))?)\\s+(${CS_ID})`, 'gu');
   let match: RegExpExecArray | null;
-  while ((match = regex.exec(safe)) !== null) names.add(match[1]!);
+  while ((match = regex.exec(safe)) !== null) names.add(canonicalIdName(match[1]!));
   return names;
+}
+
+// --- C# identifier grammar (round 7) ------------------------------------------------------------
+// ONE grammar for every scanner that reads a C# identifier. C# identifiers may carry a verbatim
+// `@` prefix (the prefix is NOT part of the name: `@namespace` names the type `namespace`) and may
+// use Unicode letters/digits/combining marks (ECMA-334 §6.4.3, approximated by Unicode property
+// classes). Round 6's layout check, the namespace-span scanner and the class scanner each encoded
+// a narrower ASCII subset; the gaps between those subsets fabricated rows from names one scanner
+// saw and another didn't (round 7 I3-I8) and suppressed a legal `class @namespace` (A1).
+const CS_ID_PART = '\\p{L}\\p{Nl}\\p{Nd}\\p{Pc}\\p{Mn}\\p{Mc}\\p{Cf}';
+const CS_ID = `@?[\\p{L}\\p{Nl}_][${CS_ID_PART}]*`;
+const CS_QID = `${CS_ID}(?:\\s*\\.\\s*${CS_ID})*`;
+
+// The verbatim prefix is spelling, not identity: `@X` and `X` are the SAME C# name. Every name
+// stored for comparison (class names, alias LHS, local-type shadows, namespace labels) must be
+// canonicalized or the escaped spelling slips past shadow/kill sets and fabricates.
+function canonicalIdName(token: string): string {
+  return token.startsWith('@') ? token.slice(1) : token;
+}
+
+// `[ ... ]` matcher for attribute lists (nesting from array creation inside attribute arguments).
+function findMatchingBracket(text: string, openIndex: number): number {
+  let depth = 0;
+  for (let i = openIndex; i < text.length; i++) {
+    const c = text[i];
+    if (c === '[') depth++;
+    else if (c === ']') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Every `namespace` KEYWORD occurrence with its declared name and delimiter. The keyword match is
+// spelling-exact: never the escaped identifier `@namespace`, never a fragment of a longer (Unicode)
+// identifier. A keyword whose following text does not parse as `qualified-name { or ;` is
+// `malformed` — such a file cannot compile (`namespace {`, a name using `\uXXXX` escapes we cannot
+// decode, a truncated declaration), so the layout check suppresses it rather than guessing.
+// Shared by namespaceSpans and illegalNamespaceLayout so the two can never disagree on what a
+// namespace declaration is (round 7: they encoded different subsets and the gap fabricated).
+interface NsDecl {
+  start: number;
+  kind: '{' | ';' | 'malformed';
+  name: string;
+  delim: number;
+}
+
+function scanNamespaceDecls(safe: string): NsDecl[] {
+  const decls: NsDecl[] = [];
+  const keyword = new RegExp(`(?<![@.${CS_ID_PART}])namespace(?![${CS_ID_PART}])`, 'gu');
+  const nameAndDelim = new RegExp(`^\\s*(${CS_QID})\\s*([{;])`, 'u');
+  let match: RegExpExecArray | null;
+  while ((match = keyword.exec(safe)) !== null) {
+    const after = safe.slice(match.index + 'namespace'.length);
+    const parsed = nameAndDelim.exec(after);
+    if (!parsed) {
+      decls.push({ start: match.index, kind: 'malformed', name: '', delim: match.index + 'namespace'.length });
+      continue;
+    }
+    const delim = match.index + 'namespace'.length + parsed[0].length - 1;
+    const name = parsed[1]!
+      .split('.')
+      .map((segment) => canonicalIdName(segment.trim()))
+      .join('.');
+    decls.push({ start: match.index, kind: parsed[2] as '{' | ';', name, delim });
+    keyword.lastIndex = delim + 1;
+  }
+  return decls;
 }
 
 // Enclosing-namespace label for a source offset, used only to decide whether two same-named partial
@@ -808,48 +877,83 @@ function collectNonClassTypeNames(safe: string): Set<string> {
 // (brace span) and file-scoped `namespace A.B;` (to EOF); nested namespaces concatenate outer→inner.
 // A declaration outside any namespace yields '' (the global namespace). Two partial blocks merge
 // only when their labels are byte-equal, so partials in different namespaces stay distinct.
+// Malformed declarations produce no span — parseClassBlocks has already suppressed such files.
 function namespaceSpans(safe: string): Array<{ name: string; start: number; end: number }> {
   const spans: Array<{ name: string; start: number; end: number }> = [];
-  const regex = /\bnamespace\s+([A-Za-z_][\w.]*)\s*([{;])/g;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(safe)) !== null) {
-    if (match[2] === '{') {
-      const open = safe.indexOf('{', match.index);
-      const close = open === -1 ? -1 : findMatchingBrace(safe, open);
-      spans.push({ name: match[1]!, start: match.index, end: close === -1 ? safe.length : close });
+  for (const decl of scanNamespaceDecls(safe)) {
+    if (decl.kind === 'malformed') continue;
+    if (decl.kind === '{') {
+      const close = findMatchingBrace(safe, decl.delim);
+      spans.push({ name: decl.name, start: decl.start, end: close === -1 ? safe.length : close });
     } else {
-      spans.push({ name: match[1]!, start: match.index, end: safe.length });
+      spans.push({ name: decl.name, start: decl.start, end: safe.length });
     }
   }
   return spans;
+}
+
+// Everything the compiler allows BEFORE a file-scoped namespace declaration: extern-alias
+// directives, using directives (`global using`, `using static`, using-aliases — including
+// C# 12 alias-any-type targets) and assembly/module attribute lists. ANY other leading construct
+// — a type declaration in any identifier spelling, a top-level statement (including a `using (…)`
+// STATEMENT, which is not a directive), anything unrecognized — makes the layout CS8956-illegal.
+// A whitelist, because the round-6 keyword blacklist could only reject spellings it could parse:
+// escaped/Unicode type names and top-level statements walked straight past it (round 7 I3/I4/I5).
+function isLegalFileScopedPrelude(prelude: string): boolean {
+  const externAlias = new RegExp(`^extern\\s+alias\\s+${CS_ID}\\s*;`, 'u');
+  const usingDirective = new RegExp(
+    `^(?:global\\s+)?using\\s+(?:static\\s+)?(?:unsafe\\s+)?(?:${CS_ID}\\s*=\\s*[^;]*;|(?:${CS_ID}\\s*::\\s*)?${CS_QID}(?:<[^;]*>)?\\s*;)`,
+    'u'
+  );
+  let rest = prelude;
+  for (;;) {
+    rest = rest.replace(/^\s+/u, '');
+    if (rest === '') return true;
+    const extern = externAlias.exec(rest);
+    if (extern) {
+      rest = rest.slice(extern[0].length);
+      continue;
+    }
+    const using = usingDirective.exec(rest);
+    if (using) {
+      rest = rest.slice(using[0].length);
+      continue;
+    }
+    if (rest.startsWith('[')) {
+      const close = findMatchingBracket(rest, 0);
+      if (close === -1) return false;
+      if (!/^\s*(?:assembly|module)\s*:/u.test(rest.slice(1, close))) return false;
+      rest = rest.slice(close + 1);
+      continue;
+    }
+    return false;
+  }
 }
 
 // A compilation unit whose namespace layout the C# compiler rejects cannot produce any
 // framework-invoked member, and the scanner's namespace spans are meaningless on it — every row
 // derived from them would be a fabrication (N1/N2, round 6). Runs on the comment-stripped,
 // string-masked, preprocessor-blanked text, so an inactive `#if false` declaration never counts.
-// Illegal shapes (each maps to a compiler error): a file-scoped declaration preceded by any type
-// declaration (CS8956), file-scoped mixed with block namespaces in either order (CS8955), and
-// more than one file-scoped declaration (CS8954). The type-keyword scan errs toward suppression:
-// a keyword-shaped token before the declaration marks the file illegal even if the compiler would
-// have found a different first error — a missed edge, never a fabricated one.
+// Illegal shapes (each maps to a compiler error): a file-scoped declaration preceded by anything
+// other than the legal directive/attribute prelude (CS8956 — members of ANY kind count, not just
+// type declarations), file-scoped mixed with block namespaces in either order (CS8955), more than
+// one file-scoped declaration (CS8954), and a declaration whose name the scanner cannot parse
+// (uncompilable or undecodable — suppression is the safe direction either way).
 function illegalNamespaceLayout(safe: string): boolean {
-  const regex = /\bnamespace\s+[A-Za-z_][\w.]*\s*([{;])/g;
   let firstFileScoped = -1;
   let hasBlock = false;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(safe)) !== null) {
-    if (match[1] === ';') {
+  for (const decl of scanNamespaceDecls(safe)) {
+    if (decl.kind === 'malformed') return true;
+    if (decl.kind === ';') {
       if (firstFileScoped !== -1) return true; // second file-scoped declaration (CS8954)
-      firstFileScoped = match.index;
+      firstFileScoped = decl.start;
     } else {
       hasBlock = true;
     }
   }
   if (firstFileScoped === -1) return false;
   if (hasBlock) return true; // mixed forms, either order (CS8955)
-  const before = safe.slice(0, firstFileScoped);
-  return /\b(?:class|struct|interface|enum|delegate|record)\s+[A-Za-z_]/.test(before); // CS8956
+  return !isLegalFileScopedPrelude(safe.slice(0, firstFileScoped)); // CS8956
 }
 
 function namespaceLabelAt(spans: Array<{ name: string; start: number; end: number }>, index: number): string {
@@ -922,11 +1026,23 @@ function parseClassBlocks(
   if (illegalNamespaceLayout(safe)) {
     return { classes: [], openStacks: [], killedAttrNames: new Set() };
   }
+  // A `\uXXXX`/`\UXXXXXXXX` escape surviving comment-strip + string-mask + preprocessor-blank sits
+  // in CODE — a Unicode-escaped identifier (legal C#: an interface spelled with \u-escapes can
+  // declare the NAME NetworkBehaviour). This scanner cannot decode escape equivalence, so every
+  // name
+  // comparison in such a file is unsound — shadow and kill sets silently miss, which fabricates.
+  // Emit nothing for the whole file instead (round 7, closed conservatively).
+  if (/\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8}/.test(safe)) {
+    return { classes: [], openStacks: [], killedAttrNames: new Set() };
+  }
   const nsSpans = namespaceSpans(safe);
   const aliasDecls = parseAliasDecls(safe, nsSpans, pp.stateAt);
   const resolveAlias = makeAliasResolver(aliasDecls);
   const classes: ClassBlock[] = [];
-  const classRegex = /(?:\b(?:public|private|protected|internal|sealed|abstract|partial|static|new)\s+)*class\s+([A-Za-z_]\w*)(?:\s*:\s*([^{]+))?\s*\{/g;
+  const classRegex = new RegExp(
+    `(?:\\b(?:public|private|protected|internal|sealed|abstract|partial|static|new)\\s+)*class\\s+(${CS_ID})(?:\\s*:\\s*([^{]+))?\\s*\\{`,
+    'gu'
+  );
   let match: RegExpExecArray | null;
   while ((match = classRegex.exec(safe)) !== null) {
     const openBrace = safe.indexOf('{', match.index);
@@ -938,7 +1054,7 @@ function parseClassBlocks(
     const bases = fullBases.map((b) => b.split('.').pop() || b);
     const header = match[0]!.slice(0, match[0]!.indexOf('class'));
     classes.push({
-      name: match[1]!,
+      name: canonicalIdName(match[1]!),
       bases,
       fullBases,
       attributes: leadingAttributes(safe, match.index),

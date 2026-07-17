@@ -2665,6 +2665,262 @@ namespace Live
       expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
     });
 
+    // --- Round 7 (graduation re-review): C# identifier grammar (I3-I8, A1) ---
+    // Round 6's layout check, the namespace-span scanner and the class scanner each encoded a
+    // narrower ASCII subset of C#'s identifier grammar. C# identifiers may carry a verbatim `@`
+    // prefix (`@namespace` names the type `namespace`), use Unicode letters, or use `\uXXXX`
+    // escapes — so names those scanners could not parse slipped past the illegal-layout check
+    // (fabrications I3-I8), local-shadow and alias-kill sets (adjacent fabrications), and the
+    // class parser itself (false suppression A1). One shared grammar now backs all of them, and
+    // a name the scanner still cannot decode suppresses rather than emits.
+
+    it('emits nothing when an @-escaped type precedes a file-scoped namespace (I3, round 7)', () => {
+      // CS8956 — `@EarlyType` is a type declaration even though the round-6 keyword scan could
+      // not see its name.
+      const result = extract(`
+using Mirror;
+public class @EarlyType { }
+namespace Invalid.AfterEscapedType;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a Unicode-named type precedes a file-scoped namespace (I4, round 7)', () => {
+      // CS8956 — `Ångström` is a legal C# identifier the ASCII scan missed.
+      const result = extract(`
+using Mirror;
+public class Ångström { }
+namespace Invalid.AfterUnicodeType;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a top-level statement precedes a file-scoped namespace (I5, round 7)', () => {
+      // CS8956 covers ALL members, not just type declarations — the prelude before a file-scoped
+      // namespace may hold only extern-alias/using directives and assembly/module attributes.
+      const result = extract(`
+using Mirror;
+System.Console.WriteLine("before namespace");
+namespace Invalid.AfterTopLevelStatement;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a using STATEMENT precedes a file-scoped namespace (I5-adjacent, round 7)', () => {
+      // A `using (...)` statement is a top-level statement, not a directive — it must not pass
+      // the legal-prelude whitelist.
+      const result = extract(`
+using Mirror;
+using (var f = System.IO.File.OpenRead("x")) { }
+namespace Invalid.AfterUsingStatement;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when an @-escaped file-scoped namespace mixes with a block namespace (I6, round 7)', () => {
+      // CS8955 — the file-scoped declaration's escaped name hid it from the round-6 scan.
+      const result = extract(`
+using Mirror;
+namespace @FileScoped;
+namespace Invalid.Block
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+        [Command] void Cmd() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a file-scoped namespace mixes with an @-escaped block namespace (I7, round 7)', () => {
+      const result = extract(`
+using Mirror;
+namespace Invalid.FileScoped;
+namespace @Block
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+        [Command] void Cmd() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a Unicode file-scoped namespace mixes with a block namespace (I8, round 7)', () => {
+      const result = extract(`
+using Mirror;
+namespace Ångström;
+namespace Invalid.Block
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+        [Command] void Cmd() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a namespace declaration with no parsable name (round 7)', () => {
+      // `namespace {` is uncompilable; the old scanner simply failed to see the declaration and
+      // parsed the class at global scope, emitting from an impossible unit.
+      const result = extract(`
+using Mirror;
+namespace
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still emits for a legal @-escaped class carrying Mirror surfaces (A1, round 7)', () => {
+      // False-suppression direction: `class @namespace : NetworkBehaviour` is legal C# — the
+      // class is NAMED `namespace` (the verbatim prefix is not part of the name) and must emit.
+      const result = extract(`
+using Mirror;
+namespace Legal.EscapedClass;
+public class @namespace : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer namespace.OnStartServer',
+        'UNITY attribute Command namespace.Cmd',
+      ]);
+      expect(refPairs(result)).toEqual([
+        'references:unity:host:namespace.OnStartServer',
+        'references:unity:method:namespace.Cmd',
+      ]);
+    });
+
+    it('still emits when the legal prelude holds using, extern alias and assembly attributes (round 7 control)', () => {
+      // The CS8956 check is a whitelist; everything the compiler allows before a file-scoped
+      // namespace must keep the file emitting.
+      const result = extract(`
+extern alias Vendor;
+global using System;
+using Mirror;
+using static System.Math;
+using NB = Mirror.NetworkBehaviour;
+[assembly: System.Reflection.AssemblyMetadata("k", "v")]
+[module: System.CLSCompliant(false)]
+namespace Legal.Prelude;
+
+public class Player : NB
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('suppresses a bare gated base bound by an @-escaped using-alias (round 7)', () => {
+      // `using @NetworkBehaviour = …` binds the NAME NetworkBehaviour; C# resolves Player's bare
+      // base to the alias target, not Mirror. The ASCII alias scan missed the escaped LHS and
+      // fabricated a Mirror host.
+      const result = extract(`
+using Mirror;
+using @NetworkBehaviour = Foreign.Net;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a bare gated base shadowed by an @-escaped local type (round 7)', () => {
+      // `interface @NetworkBehaviour` locally declares the NAME NetworkBehaviour, so the bare
+      // base binds to the local type — same shadow rule as the ASCII spelling.
+      const result = extract(`
+using Mirror;
+namespace N
+{
+    interface @NetworkBehaviour { }
+    class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when code carries Unicode identifier escapes (round 7)', () => {
+      // `interface \\u004EetworkBehaviour` also declares the NAME NetworkBehaviour — C# decodes
+      // \\uXXXX escapes in identifiers, this scanner cannot. Any escape surviving comment-strip +
+      // string-mask + preprocessor-blank sits in code, so every name comparison in the file is
+      // unsound: emit nothing.
+      const result = extract(`
+using Mirror;
+namespace N
+{
+    interface \\u004EetworkBehaviour { }
+    class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('ignores Unicode escapes inside strings and inactive regions (round 7 control)', () => {
+      const result = extract(`
+using Mirror;
+#if false
+class \\u0044ead { }
+#endif
+namespace Live
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+        void Log() { var s = "\\u0041"; var c = '\\u0042'; }
+    }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
     // --- SyncVar field liveness ---
 
     it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {
