@@ -143,6 +143,28 @@ Baseline run of those 4 files (changes stashed): **10 failed** — same families
 (the 12th/11th failure is a flaky daemon-lifecycle test that fails intermittently in both states).
 None of the failures touch unity, resolution, or any file changed by this branch.
 
+### Real-project validation (Mirror v96.11.0 source as the corpus)
+
+Every `.cs` file under the acquired release's `Assets/Mirror` tree (923 files — Core, Examples,
+Authenticators, Tests: real user-style Mirror code) was run through **both** resolver builds
+(round-5 fix vs a from-source build of rejected tip `c113cfa`, which reproduces all six probe
+fabrications) and the emitted rows diffed per file:
+
+- files scanned: **923**; files with rows (new build): **313**
+- total rows — new: **1707**, baseline: **1703**, delta: **+4**; extraction errors: **0**
+- files with differing rows: **2**, both pure GAINS (zero rows lost anywhere):
+  - `Authenticators/UniqueNameAuthenticator.cs` — `[UnityEngine.RuntimeInitializeOnLoadMethod]`
+    `ResetStatics` (a genuine Unity-invoked static entry point; the baseline's scanner was
+    desynced by raw `#if !UNITY_2020_3_OR_NEWER`/`#else` field-declaration lines).
+  - `Examples/TopDownShooter/Scripts/PlayerTopDown.cs` — `[Command] CmdFlashLight` (a genuine
+    Mirror Command in a `NetworkBehaviour` class with an active top-level `using Mirror;`; the
+    baseline was desynced by the file's many `#if !UNITY_SERVER` regions).
+
+Conclusion: the round-5 suppressions cause **no regression on real code** — no mass suppression
+from real-world `#if` regions or scoped aliases — and blanking directive lines *recovered* two
+genuine rows the old scanner dropped. Scan tooling: `real-project-scan.mjs` /
+`blocker-repro-probe.mjs` (fork-local, gitignored `scratch/round5-review/`).
+
 ## Conservative omissions (deliberate missed edges, unchanged)
 
 Recorded in the invocation table; re-affirmed against v96.11.0 — none became unsafe:
