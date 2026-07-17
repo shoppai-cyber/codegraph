@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { unityResolver } from '../src/resolution/frameworks/unity';
+import { unityResolver, __gatedStacksForTest } from '../src/resolution/frameworks/unity';
 import { getFrameworkResolver } from '../src/resolution/frameworks';
 import type {
   FrameworkExtractionResult,
@@ -174,7 +174,10 @@ class Player : BaseBehaviour
       expect(crossFile).toEqual({ nodes: [], references: [] });
     });
 
-    it('treats each partial class block independently', () => {
+    it('classifies members of a base-less sibling partial block via the merged type (SHOULD-FIX 1, round 4)', () => {
+      // The two blocks are ONE compiler type (same name, same namespace, both partial); the base-less
+      // block's Update() belongs to the MonoBehaviour-derived Player and must be live. The old
+      // behavior lost it by classifying each block only from its own bases.
       const result = extract(`
 using UnityEngine;
 
@@ -187,7 +190,8 @@ partial class Player
     void Update() {}
 }
 `);
-      expect(result).toEqual({ nodes: [], references: [] });
+      expect(nodeNames(result)).toEqual(['UNITY MonoBehaviour.Update Player.Update']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.Update']);
     });
 
     it('emits ScriptableObject lifecycle and CreateAssetMenu class liveness', () => {
@@ -484,6 +488,47 @@ class Player : MonoBehaviour
           'references:unity:field:Player.weapon',
         ].sort()
       );
+    });
+
+    it('emits a [SerializeField] field with a BRACE object initializer (Tier-1, BLOCKING 3)', () => {
+      const result = extract(`
+using UnityEngine;
+
+class Player : MonoBehaviour
+{
+    [SerializeField] PlayerData data = new PlayerData { Health = 100 };
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY serialized field Player.data']);
+      expect(refPairs(result)).toEqual(
+        ['references:PlayerData', 'references:unity:field:Player.data'].sort()
+      );
+    });
+
+    it('emits a [SerializeField] field with a GENERIC constructor initializer (Tier-1, BLOCKING 4)', () => {
+      const result = extract(`
+using UnityEngine;
+using System.Collections.Generic;
+
+class Player : MonoBehaviour
+{
+    [SerializeField] Dictionary<int,string> lookup = new Dictionary<int,string>();
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY serialized field Player.lookup']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
+    it('emits nothing for a CONST [SerializeField] field (Unity does not serialize consts; BLOCKING 3)', () => {
+      const result = extract(`
+using UnityEngine;
+
+class Player : MonoBehaviour
+{
+    [SerializeField] const int health = 100;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
     });
 
     it('emits field-target SerializeField on auto-properties as property liveness', () => {
@@ -935,6 +980,71 @@ class Player : NetworkBehaviour
       expect(mirror).toEqual({ nodes: [], references: [] });
     });
 
+    it('emits nothing for a FOREIGN-qualified [Other.ServerRpc] under an open FishNet gate (BLOCKING 3)', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [Other.ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits a ServerRpc entry point for an OWNING-qualified [FishNet.Object.ServerRpc] (BLOCKING 3)', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [FishNet.Object.ServerRpc] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute ServerRpc Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
+    it('emits nothing for a GATE-PREFIX-qualified [FishNet.ServerRpc] — attrs live in FishNet.Object (BLOCKING 2 r3)', () => {
+      // `FishNet` is the gate namespace; FishNet's RPC attributes live in `FishNet.Object`. A
+      // `[FishNet.ServerRpc]` is a custom `FishNet.ServerRpcAttribute`, not the framework's, so it
+      // must not emit even with the gate open.
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [FishNet.ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a DESCENDANT-qualified [FishNet.Whatever.ServerRpc] (exact qualifier only, BLOCKING 2 r2)', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [FishNet.Whatever.ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a foreign attribute ALIAS shadowing the bare [ServerRpc] token (BLOCKING 2 r2)', () => {
+      const result = extract(`
+using FishNet.Object;
+using ServerRpc = Other.ServerRpcAttribute;
+
+class Player : NetworkBehaviour
+{
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
     it('emits RPC and prediction attribute entry points on a NetworkBehaviour-based class', () => {
       const result = extract(`
 using FishNet.Object;
@@ -1050,6 +1160,2740 @@ class Player : FishNet.Object.NetworkBehaviour
           'references:unity:method:Player.CmdMove',
         ].sort()
       );
+    });
+
+    // --- Phase 0 characterization: pins current gate behavior before the generic refactor ---
+
+    it('closes the gate when a FQ FishNet base is combined with a competing Mirror using (characterization: exclusion wins over FQ evidence)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : FishNet.Object.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens only on a real FishNet namespace segment, not a longer identifier (characterization: prefix boundary)', () => {
+      const notFishNet = extract(`
+using FishNetX;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(notFishNet).toEqual({ nodes: [], references: [] });
+
+      const subNamespace = extract(`
+using FishNet.Managing;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(nodeNames(subNamespace)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(subNamespace)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+  });
+
+  describe('extract() — gate hardening (F1–F4)', () => {
+    it('F1: closes the FishNet gate when Photon Fusion is imported alongside FishNet', () => {
+      const result = extract(`
+using FishNet.Managing;
+using Fusion;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    void Update() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('F2: a fully-qualified FishNet base token as a field TYPE does not open the gate', () => {
+      const result = extract(`
+class Holder
+{
+    FishNet.Object.NetworkBehaviour reference;
+}
+
+class Other : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('F2: a fully-qualified FishNet base token in a real base clause still opens the gate', () => {
+      const result = extract(`
+class Player : FishNet.Object.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('F3: a required-prefix using-ALIAS directive is not gate evidence', () => {
+      const result = extract(`
+using FishNet = Some.Other.Namespace;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('F3: a disqualifier-prefix using-ALIAS directive does not close the gate', () => {
+      const result = extract(`
+using FishNet.Object;
+using Mirror = Some.Other.Namespace;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('F4: parsed stack host-base rules carry only object rules with a method list (no doc keys)', () => {
+      expect(__gatedStacksForTest.length).toBeGreaterThan(0);
+      for (const stack of __gatedStacksForTest) {
+        expect(stack.hostBases.has('note')).toBe(false);
+        expect(stack.hostBases.has('detection')).toBe(false);
+        for (const base of stack.hostBases) {
+          expect(Array.isArray(stack.hostRules[base]!.hostInvokedMethods)).toBe(true);
+        }
+      }
+      const fishnet = __gatedStacksForTest.find((s) => s.name === 'fishnet');
+      expect(fishnet?.hostBases.has('NetworkBehaviour')).toBe(true);
+    });
+  });
+
+  describe('extract() — Mirror networking (Tier 2, gated)', () => {
+    it('registers a mirror gated stack with a NetworkBehaviour host base', () => {
+      const mirror = __gatedStacksForTest.find((s) => s.name === 'mirror');
+      expect(mirror).toBeDefined();
+      expect(mirror?.hostBases.has('NetworkBehaviour')).toBe(true);
+      expect(mirror?.syncVarAttribute).toBe('SyncVar');
+      expect(mirror?.syncVarHookArg).toBe('hook');
+    });
+
+    it('emits NetworkBehaviour callbacks and MonoBehaviour-message union when the Mirror gate is open', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    public override void OnStopClient() {}
+    public override void OnStartLocalPlayer() {}
+    public override bool OnSerialize(NetworkWriter writer, bool initialState) { return true; }
+    protected override void SerializeSyncVars(NetworkWriter writer, bool initialState) {}
+    void Update() {}
+    void Helper() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY NetworkBehaviour.OnStopClient Player.OnStopClient',
+          'UNITY NetworkBehaviour.OnStartLocalPlayer Player.OnStartLocalPlayer',
+          'UNITY NetworkBehaviour.OnSerialize Player.OnSerialize',
+          'UNITY NetworkBehaviour.SerializeSyncVars Player.SerializeSyncVars',
+          'UNITY NetworkBehaviour.Update Player.Update',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Player.OnStartServer',
+          'references:unity:host:Player.OnStopClient',
+          'references:unity:host:Player.OnStartLocalPlayer',
+          'references:unity:host:Player.OnSerialize',
+          'references:unity:host:Player.SerializeSyncVars',
+          'references:unity:host:Player.Update',
+        ].sort()
+      );
+    });
+
+    it('recognizes ALL 12 Mirror NetworkBehaviour override callbacks', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    public override void OnStopServer() {}
+    public override void OnStartClient() {}
+    public override void OnStopClient() {}
+    public override void OnStartLocalPlayer() {}
+    public override void OnStopLocalPlayer() {}
+    public override void OnStartAuthority() {}
+    public override void OnStopAuthority() {}
+    public override bool OnSerialize(NetworkWriter writer, bool initialState) { return true; }
+    public override void OnDeserialize(NetworkReader reader, bool initialState) {}
+    protected override void SerializeSyncVars(NetworkWriter writer, bool initialState) {}
+    protected override void DeserializeSyncVars(NetworkReader reader, bool initialState) {}
+    void NotACallback() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY NetworkBehaviour.OnStopServer Player.OnStopServer',
+          'UNITY NetworkBehaviour.OnStartClient Player.OnStartClient',
+          'UNITY NetworkBehaviour.OnStopClient Player.OnStopClient',
+          'UNITY NetworkBehaviour.OnStartLocalPlayer Player.OnStartLocalPlayer',
+          'UNITY NetworkBehaviour.OnStopLocalPlayer Player.OnStopLocalPlayer',
+          'UNITY NetworkBehaviour.OnStartAuthority Player.OnStartAuthority',
+          'UNITY NetworkBehaviour.OnStopAuthority Player.OnStopAuthority',
+          'UNITY NetworkBehaviour.OnSerialize Player.OnSerialize',
+          'UNITY NetworkBehaviour.OnDeserialize Player.OnDeserialize',
+          'UNITY NetworkBehaviour.SerializeSyncVars Player.SerializeSyncVars',
+          'UNITY NetworkBehaviour.DeserializeSyncVars Player.DeserializeSyncVars',
+        ].sort()
+      );
+    });
+
+    it('emits nothing for a NetworkBehaviour class with no Mirror using', () => {
+      const result = extract(`
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    void Update() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a competing stack is imported alongside Mirror (collision guard)', () => {
+      const netcode = extract(`
+using Mirror;
+using Unity.Netcode;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(netcode).toEqual({ nodes: [], references: [] });
+
+      const fishnet = extract(`
+using Mirror;
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(fishnet).toEqual({ nodes: [], references: [] });
+
+      const fusion = extract(`
+using Mirror;
+using Fusion;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(fusion).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits Command / ClientRpc / TargetRpc entry points on a NetworkBehaviour-based class', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Command] void CmdMove() {}
+    [ClientRpc] void RpcMove() {}
+    [TargetRpc] void TargetMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY attribute ClientRpc Player.RpcMove',
+          'UNITY attribute Command Player.CmdMove',
+          'UNITY attribute TargetRpc Player.TargetMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:method:Player.CmdMove',
+          'references:unity:method:Player.RpcMove',
+          'references:unity:method:Player.TargetMove',
+        ].sort()
+      );
+    });
+
+    it('emits nothing for Mirror RPC attributes on a non-NetworkBehaviour class', () => {
+      const result = extract(`
+using Mirror;
+
+class PlainHelper
+{
+    [Command] void CmdMove() {}
+    [ClientRpc] void RpcMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- attribute-name qualification (BLOCKING 3) ---
+
+    it('emits nothing for a FOREIGN-qualified [Other.Command] on a NetworkBehaviour class', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Other.Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits a Command entry point for an OWNING-qualified [Mirror.Command]', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
+    it('emits a Command entry point for the Attribute-suffixed [CommandAttribute]', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [CommandAttribute] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
+    it('emits a Command entry point for the owning-qualified + suffixed [Mirror.CommandAttribute]', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.CommandAttribute] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
+    it('emits nothing for the Mirror Server/Client guard attributes', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Server] void ServerOnly() {}
+    [ServerCallback] void ServerCb() {}
+    [Client] void ClientOnly() {}
+    [ClientCallback] void ClientCb() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- attribute provenance: exact qualifier + alias resolution (BLOCKING 2, round 2) ---
+
+    it('emits nothing for a DESCENDANT-qualified [Mirror.Whatever.Command] (exact qualifier only)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.Whatever.Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a DESCENDANT-qualified [Mirror.Whatever.SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.Whatever.SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a foreign attribute ALIAS shadowing the bare [Command] token', () => {
+      const result = extract(`
+using Mirror;
+using Command = Other.CommandAttribute;
+
+class Player : NetworkBehaviour
+{
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a foreign attribute ALIAS shadowing the bare [SyncVar] token', () => {
+      const result = extract(`
+using Mirror;
+using SyncVar = Other.SyncVarAttribute;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('KILLS the bare [Command] token file-wide when an alias rebinds that name, even to Mirror own (BLOCKING 2 r3)', () => {
+      // Conservative KILL rule (round 3): any `using Command = …;` — regardless of target, including
+      // Mirror's own attribute — makes bare `[Command]` unreliable, so it is rejected file-wide.
+      // This is a deliberately accepted missed edge (a qualified `[Mirror.Command]` still emits).
+      const result = extract(`
+using Mirror;
+using Command = Mirror.CommandAttribute;
+
+class Player : NetworkBehaviour
+{
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still emits bare [Command] when a NON-colliding alias name is present (BLOCKING 2 r3)', () => {
+      const result = extract(`
+using Mirror;
+using Cmd = Mirror.CommandAttribute;
+
+class Player : NetworkBehaviour
+{
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command Player.CmdMove']);
+      expect(refPairs(result)).toEqual(['references:unity:method:Player.CmdMove']);
+    });
+
+    it('KILLS bare [Command] from a SAME-LINE alias directive (BLOCKING 2 r3)', () => {
+      const result = extract(`
+using Mirror; using Command = Other.CommandAttribute;
+
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('KILLS bare [Command] from a NAMESPACE-SCOPED alias directive, in either declaration order (BLOCKING 2 r3)', () => {
+      const forward = extract(`
+using Mirror;
+namespace A {
+    using Command = Other.CommandAttribute;
+    class Victim : Mirror.NetworkBehaviour { [Command] void CmdMove() {} }
+}
+namespace B {
+    using Command = Mirror.CommandAttribute;
+}
+`);
+      expect(forward).toEqual({ nodes: [], references: [] });
+
+      const reversed = extract(`
+using Mirror;
+namespace B {
+    using Command = Mirror.CommandAttribute;
+}
+namespace A {
+    using Command = Other.CommandAttribute;
+    class Victim : Mirror.NetworkBehaviour { [Command] void CmdMove() {} }
+}
+`);
+      expect(reversed).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens the gate on a fully-qualified Mirror.NetworkBehaviour base without a using', () => {
+      const result = extract(`
+class Player : Mirror.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY attribute Command Player.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Player.OnStartServer',
+          'references:unity:method:Player.CmdMove',
+        ].sort()
+      );
+    });
+
+    it('closes the gate when a FQ Mirror base is combined with a competing using (exclusion wins over FQ evidence)', () => {
+      const result = extract(`
+using Unity.Netcode;
+
+class Player : Mirror.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens only on the real Mirror namespace, not a longer identifier (prefix boundary)', () => {
+      const notMirror = extract(`
+using MirrorX;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+}
+`);
+      expect(notMirror).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens the Mirror gate on a sub-namespace using (using Mirror.Components)', () => {
+      const result = extract(`
+using Mirror.Components;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+          'UNITY attribute Command Player.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdMove'].sort()
+      );
+    });
+
+    it('does not treat a Mirror using-ALIAS directive as gate evidence', () => {
+      const result = extract(`
+using Mirror = Some.Other.Namespace;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not open the Mirror gate on a FQ Mirror.NetworkBehaviour token used only as a field type', () => {
+      const result = extract(`
+class Holder
+{
+    Mirror.NetworkBehaviour reference;
+}
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('closes the Mirror gate when a FQ Mirror base is combined with using Fusion (Fusion disqualifier)', () => {
+      const result = extract(`
+using Fusion;
+
+class Player : Mirror.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a STATIC [Command] under an open Mirror gate (requiresInstance)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Command] static void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not open the Mirror gate for a commented-out using directive', () => {
+      const result = extract(`
+// using Mirror;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not double-emit for a plain MonoBehaviour class under an open Mirror gate', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : MonoBehaviour
+{
+    void Update() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY MonoBehaviour.Update Player.Update']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.Update']);
+    });
+
+    // --- BLOCKING 1: foreign fully-qualified NetworkBehaviour bases must NOT be claimed ---
+
+    it('emits nothing for an NGO fully-qualified NetworkBehaviour base under an open Mirror gate', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : Unity.Netcode.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a Photon Fusion fully-qualified NetworkBehaviour base under an open Mirror gate', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : Fusion.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for an unrelated dotted NetworkBehaviour base whose last segment merely collides', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : MyStuff.NetworkBehaviour
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- BLOCKING 2: FQ stack ownership propagates through same-file base chains ---
+
+    it('does not claim a same-file FishNet-FQ-rooted chain for Mirror (Mirror gate open via using)', () => {
+      const result = extract(`
+using Mirror;
+
+class ForeignBase : FishNet.Object.NetworkBehaviour {}
+class Child : ForeignBase
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not claim a same-file Mirror-FQ-rooted chain for FishNet (FishNet gate open via using)', () => {
+      const result = extract(`
+using FishNet.Object;
+
+class MirrorBase : Mirror.NetworkBehaviour {}
+class Child : MirrorBase
+{
+    public override void OnStartServer() {}
+    [ServerRpc] void CmdMove() {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('DOES apply Mirror host rules to a same-file Mirror-rooted (bare) base chain', () => {
+      const result = extract(`
+using Mirror;
+
+class BaseNet : NetworkBehaviour {}
+class Child : BaseNet
+{
+    public override void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.CmdMove',
+        ].sort()
+      );
+    });
+
+    // --- BLOCKING 1 (round 2): namespace-blind chain propagation must not donate ownership ---
+
+    it('does not donate Mirror ownership across a same-name collision in different namespaces', () => {
+      // Two distinct `Root` types: a FishNet-rooted one (foreign) and a Mirror-rooted one. The
+      // bare-name chain lookup must NOT let `Foreign.Child : Root` inherit the unrelated Mirror
+      // `Local.Root` — a duplicated class name is ambiguous, so nothing may propagate through it.
+      const result = extract(`
+using Mirror;
+namespace Foreign {
+    class Root : FishNet.Object.NetworkBehaviour {}
+    class Child : Root {
+        public void OnStartServer() {}
+        [Command] void CmdMove() {}
+    }
+}
+namespace Local {
+    class Root : NetworkBehaviour {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still classifies each declaration of a duplicated class name from its OWN direct base', () => {
+      // The ambiguity rule applies only to NAME-MAP/chain propagation. A class that is DIRECTLY
+      // rooted in a Mirror base still emits its own callbacks even when its bare name is reused
+      // in another namespace.
+      const result = extract(`
+using Mirror;
+namespace A { class Widget : NetworkBehaviour { public override void OnStartServer() {} } }
+namespace B { class Widget : NetworkBehaviour { public override void OnStartClient() {} } }
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Widget.OnStartServer',
+          'UNITY NetworkBehaviour.OnStartClient Widget.OnStartClient',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Widget.OnStartServer',
+          'references:unity:host:Widget.OnStartClient',
+        ].sort()
+      );
+    });
+
+    it('collapses IDENTICAL members of a duplicated class name to the first declaration (SHOULD-FIX 5)', () => {
+      // Node names are namespace-free by resolver-wide design, so two same-named classes whose
+      // members ALSO share names collapse to one row at the first block's line. Documented bound:
+      // a directly-proven second declaration with identical member names is not separately
+      // represented (it is not a fabricated edge — the row is real, just deduplicated).
+      const result = extract(`
+using Mirror;
+namespace A { class Widget : NetworkBehaviour { public void OnStartServer() {} [Command] void Cmd() {} } }
+namespace B { class Widget : NetworkBehaviour { public void OnStartServer() {} [Command] void Cmd() {} } }
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Widget.OnStartServer',
+          'UNITY attribute Command Widget.Cmd',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Widget.OnStartServer',
+          'references:unity:method:Widget.Cmd',
+        ].sort()
+      );
+      const host = result.nodes.find((n) => n.name.includes('OnStartServer'))!;
+      expect(host.startLine).toBe(3);
+    });
+
+    // --- BLOCKING 1 (round 3): only a BARE-written base may drive same-file chain propagation ---
+
+    it('does not chain a dotted external base into an unrelated local Mirror Root', () => {
+      // `Other.Root` is a type from another file/assembly. Its last segment collides with the
+      // local `Local.Root : NetworkBehaviour`, but a dotted base must never be shortened into a
+      // same-file chain target — `Foreign.Child : Other.Root` is not a Mirror class.
+      const result = extract(`
+using Mirror;
+namespace Local { class Root : NetworkBehaviour {} }
+namespace Foreign {
+    class Child : Other.Root {
+        public void OnStartServer() {}
+        [Command] void CmdMove() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not chain a dotted external base into an unrelated local FishNet Root', () => {
+      const result = extract(`
+using FishNet.Object;
+namespace Local { class Root : NetworkBehaviour {} }
+namespace Foreign {
+    class Child : Other.Root {
+        public void OnStartServer() {}
+        [ServerRpc] void RpcMove() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still chains a bare same-file base written without a qualifier', () => {
+      const result = extract(`
+using Mirror;
+class Root : NetworkBehaviour {}
+class Child : Root {
+    public void OnStartServer() {}
+    [Command] void CmdMove() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.CmdMove',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.CmdMove',
+        ].sort()
+      );
+    });
+
+    // --- BLOCKING 3 (round 3): the duplicate-name guard must not swallow partial / nested classes ---
+
+    it('chains through an all-partial base type (one compiler type, not ambiguous)', () => {
+      const result = extract(`
+using Mirror;
+partial class Root : NetworkBehaviour {}
+partial class Root {}
+class Child : Root {
+    public void OnStartServer() {}
+    [Command] void M() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.M',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.M',
+        ].sort()
+      );
+    });
+
+    it('chains through a top-level base whose name is only shadowed by a nested class', () => {
+      const result = extract(`
+using Mirror;
+class Root : NetworkBehaviour {}
+class Outer { class Root {} }
+class Child : Root {
+    public void OnStartServer() {}
+    [Command] void M() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY NetworkBehaviour.OnStartServer Child.OnStartServer',
+          'UNITY attribute Command Child.M',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:host:Child.OnStartServer',
+          'references:unity:method:Child.M',
+        ].sort()
+      );
+    });
+
+    it('poisons the bare-name chain when a same-named struct competes in another namespace (BLOCKING 2, round 4)', () => {
+      // `Plain.Child : Root` binds to `Plain.Root` (the struct), not `Networked.Root`. Our base-name
+      // lookup is namespace-blind, so a same-simple-name non-class declaration must poison the chain
+      // rather than donate the networked class's ownership. Emit nothing (the missed edge is safe).
+      const result = extract(`
+using Mirror;
+namespace Networked { class Root : NetworkBehaviour {} }
+namespace Plain {
+    struct Root { int x; }
+    class Child : Root {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- Round 5: fabrication fixes (emit nothing on uncertain type identity) ---
+
+    it('does not merge two same-named partial types across namespaces (BLOCKING 1, round 4)', () => {
+      // `Plain.Root` (base-less partial) is a DIFFERENT compiler type from `Networked.Root`; merging
+      // them by simple name fabricates Mirror ownership for `Plain.Child : Root`. Poison, emit nothing.
+      const result = extract(`
+using Mirror;
+namespace Networked { partial class Root : NetworkBehaviour {} }
+namespace Plain {
+    partial class Root {}
+    class Child : Root {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('poisons the chain when a same-named interface competes in another namespace (BLOCKING 2, round 4)', () => {
+      const result = extract(`
+using Mirror;
+namespace Networked { class Root : NetworkBehaviour {} }
+namespace Plain {
+    interface Root {}
+    class Child : Root {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('kills a bare [Command] whose alias target is global::-qualified (BLOCKING 3, round 4)', () => {
+      // `using Command = global::Other.CommandAttribute;` rebinds the bare token; the KILL set keys on
+      // the alias LHS only, so a global::/extern-qualified target no longer leaks a false Mirror row.
+      const result = extract(`
+using Mirror;
+using Command = global::Other.CommandAttribute;
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('kills a bare [Command] whose alias target is extern-alias-qualified (BLOCKING 3, round 4)', () => {
+      const result = extract(`
+using Mirror;
+using Command = Vendor::Other.CommandAttribute;
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not resolve a base alias with two distinct namespace-scoped bindings (BLOCKING 4, round 4)', () => {
+      // `A.Victim : NB` derives from `Other.Base`; the later `namespace B { using NB = Mirror… }` is
+      // out of scope. The file-global map must NOT last-wins `NB` to Mirror. Ambiguous -> unresolved.
+      const result = extract(`
+using Mirror;
+namespace A {
+    using NB = Other.Base;
+    class Victim : NB {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+namespace B { using NB = Mirror.NetworkBehaviour; }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a bare gated host token the file locally redeclares (BLOCKING 5, round 4)', () => {
+      // `class NetworkBehaviour {}` in the file means bare `: NetworkBehaviour` binds to the local
+      // type, not Mirror's base. Emit nothing rather than fabricate a host.
+      const result = extract(`
+using Mirror;
+namespace Game {
+    class NetworkBehaviour {}
+    class P : NetworkBehaviour {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a bare [Command] the file locally redeclares, but keeps a real host callback (BLOCKING 5, round 4)', () => {
+      // `class CommandAttribute {}` shadows `[Command]` (killed), while the class is still a real
+      // Mirror host, so its OnStartServer callback stays live — the kill is surgical, not blanket.
+      const result = extract(`
+using System;
+using Mirror;
+namespace Game {
+    class CommandAttribute : Attribute {}
+    class P : NetworkBehaviour {
+        public void OnStartServer() {}
+        [Command] void M() {}
+    }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer P.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:P.OnStartServer']);
+    });
+
+    it('honors a mid-line FishNet disqualifier on a shared using line (SHOULD-FIX 3, round 4)', () => {
+      // `using Mirror; using FishNet.Object;` on ONE physical line: the FishNet exclusion must still
+      // win, so no Mirror rows emit. Token-wise gate recognition, not physical-line anchoring.
+      const result = extract(`
+using Mirror; using FishNet.Object;
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- Round 5: safe-direction fixes (must still emit) ---
+
+    it('opens the Mirror gate on a `global using` directive (SHOULD-FIX 3, round 4)', () => {
+      const result = extract(`
+global using Mirror;
+class P : NetworkBehaviour { [Command] void M() {} }
+`);
+      expect(nodeNames(result)).toEqual(['UNITY attribute Command P.M']);
+      expect(refPairs(result)).toEqual(['references:unity:method:P.M']);
+    });
+
+    it('keeps a [SyncVar] field whose initializer uses the left-shift operator (SHOULD-FIX 2, round 4)', () => {
+      const result = extract(`
+using Mirror;
+class P : NetworkBehaviour { [SyncVar] int x = a << 2; }
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field P.x']);
+      expect(refPairs(result)).toEqual(['references:unity:field:P.x']);
+    });
+
+    it('classifies members of a base-less sibling partial block for a Mirror host (SHOULD-FIX 1, round 4)', () => {
+      const result = extract(`
+using Mirror;
+partial class P : NetworkBehaviour {}
+partial class P {
+    public void OnStartServer() {}
+    [Command] void M() {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer P.OnStartServer', 'UNITY attribute Command P.M'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:P.OnStartServer', 'references:unity:method:P.M'].sort()
+      );
+    });
+
+    // --- Round 5 (graduation): B1/B2/B3 fabrication families ---
+    // B1: a `global::`/extern-qualified base ALIAS whose RHS the alias parser cannot expand must not
+    // fall back to its bare LHS token — C# binds the bare token to the alias, so classifying it as a
+    // framework base fabricates a Mirror host. Any alias LHS shadows the bare token for base
+    // classification, exactly like a local type redeclaration (kill, never resolve-through).
+
+    it('does not fabricate a Mirror host through a global::-qualified base alias (B1, round 5)', () => {
+      const result = extract(`
+using Mirror;
+using NetworkBehaviour = global::Foreign.Net.NetworkBehaviour;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+    [SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not fabricate a Mirror host through an extern-alias-qualified base alias (B1, round 5)', () => {
+      const result = extract(`
+extern alias Vendor;
+using Mirror;
+using NetworkBehaviour = Vendor::Foreign.Net.NetworkBehaviour;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('is order-independent: the foreign global:: base alias suppresses in either declaration order (B1, round 5)', () => {
+      const result = extract(`
+using NetworkBehaviour = global::Foreign.Net.NetworkBehaviour;
+using Mirror;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still resolves a supported file-scope alias of Mirror\'s own FQ base (B1 control, round 5)', () => {
+      const result = extract(`
+using Mirror;
+using NB = Mirror.NetworkBehaviour;
+
+public class Player : NB
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer', 'UNITY attribute Command Player.CmdFire'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdFire'].sort()
+      );
+    });
+
+    // B2: a using-alias declared inside one namespace is scoped to that namespace declaration in C#.
+    // Applying it file-wide fabricates ownership for classes in OTHER namespaces. Positive alias
+    // resolution is namespace-scope-aware; outside the scope the LHS name stays killed (suppression
+    // over guessed ownership).
+
+    it('does not apply an alias declared in namespace A to a class in namespace B (B2, round 5)', () => {
+      const result = extract(`
+using Mirror;
+
+namespace A
+{
+    using NB = Mirror.NetworkBehaviour;
+}
+
+namespace B
+{
+    public class Victim : NB
+    {
+        public override void OnStartServer() { }
+        [Command] void CmdFire() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not apply an alias declared in a block namespace to a top-level class after it (B2, round 5)', () => {
+      const result = extract(`
+using Mirror;
+namespace Inner { using NB = Mirror.NetworkBehaviour; }
+class Victim : NB
+{
+    public void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('prefers suppression when a namespace-scoped alias rebinds a gated token used bare elsewhere (B2, round 5)', () => {
+      // In C#, B.Victim's bare NetworkBehaviour binds to Mirror's via the file-level using — but our
+      // scope model cannot prove that without full namespace resolution, so the alias-bound name is
+      // killed file-wide for bare-base classification. Missed edge, never a guess.
+      const result = extract(`
+using Mirror;
+namespace A { using NetworkBehaviour = global::Foreign.Net.NetworkBehaviour; }
+namespace B
+{
+    class Victim : NetworkBehaviour
+    {
+        public void OnStartServer() { }
+        [Command] void CmdFire() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still resolves an alias for a class in the SAME block namespace (B2 control, round 5)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game
+{
+    using NB = Mirror.NetworkBehaviour;
+    public class Player : NB
+    {
+        public override void OnStartServer() { }
+        [Command] void CmdFire() { }
+    }
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer', 'UNITY attribute Command Player.CmdFire'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdFire'].sort()
+      );
+    });
+
+    it('still resolves an alias under a file-scoped namespace (B2 control, round 5)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+using NB = Mirror.NetworkBehaviour;
+public class Player : NB
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer', 'UNITY attribute Command Player.CmdFire'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdFire'].sort()
+      );
+    });
+
+    // B3: preprocessor text in a provably-inactive region (`#if false`) is NOT compiled — a
+    // `using Mirror;` there must not open the gate, and declarations there are not evidence of
+    // anything. Evidence (gate-opening) requires a provably-ACTIVE position; exclusion
+    // (disqualifying usings) fires from any potentially-active position. Uncertain regions
+    // (`#if UNKNOWN_SYMBOL`) provide no evidence but still exclude — emit-nothing under uncertainty.
+
+    it('does not open the Mirror gate from a using inside #if false (B3, round 5)', () => {
+      const result = extract(`
+#if false
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+    [SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not open the Mirror gate from a using inside a nested inactive branch (B3, round 5)', () => {
+      const result = extract(`
+#if true
+#if false
+using Mirror;
+#endif
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('treats the #else of #if false as active — inactive FishNet must not disqualify, active Mirror opens (B3, round 5)', () => {
+      const result = extract(`
+#if false
+using FishNet.Object;
+#else
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer', 'UNITY attribute Command Player.CmdFire'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdFire'].sort()
+      );
+    });
+
+    it('treats an #elif true after #if false as active (B3, round 5)', () => {
+      const result = extract(`
+#if false
+using FishNet.Object;
+#elif true
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('does not open the gate from a using under an UNKNOWN conditional symbol (B3, round 5)', () => {
+      // Whether UNITY_SERVER is defined is a build-configuration fact we cannot prove from the file:
+      // uncertain evidence opens nothing (missed edge over fabrication).
+      const result = extract(`
+#if UNITY_SERVER
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still honors a disqualifying using under an UNKNOWN conditional symbol (B3, round 5)', () => {
+      // The FishNet using is only potentially active — but a potentially-competing stack is enough
+      // to close the Mirror gate (exclusion always wins; suppression is the safe direction).
+      const result = extract(`
+#if SOME_SYMBOL
+using FishNet.Object;
+#endif
+using Mirror;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens the gate when an in-file #define proves the conditional using active (B3, round 5)', () => {
+      const result = extract(`
+#define MIRROR_ON
+#if MIRROR_ON
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('ignores preprocessor text inside comments and strings (B3, round 5)', () => {
+      // The commented directive and the string literal are non-evidence in BOTH directions: they
+      // neither open an inactive region nor hide the genuinely active using.
+      const result = extract(`
+// #if false
+using Mirror;
+
+public class Player : NetworkBehaviour
+{
+    string s = "#if false";
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('does not let a local shadow declaration inside #if false suppress a real Mirror host (B3, round 5)', () => {
+      // The shadowing `class NetworkBehaviour {}` is provably not compiled, so C# binds the bare base
+      // to Mirror's type — blanking the inactive region restores the correct emission.
+      const result = extract(`
+using Mirror;
+#if false
+class NetworkBehaviour {}
+#endif
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    // --- Round 6 (graduation re-review): illegal namespace layouts (N1/N2) ---
+    // A compilation unit the C# compiler rejects cannot produce framework-invoked members, so the
+    // resolver must emit NOTHING for the whole file. CS8956: a file-scoped namespace must precede
+    // all other members; CS8955: file-scoped and block namespaces cannot mix; CS8954: only one
+    // file-scoped namespace per file. The scanner's namespace spans are meaningless on such input,
+    // so any row derived from them is a fabrication.
+
+    it('emits nothing when a class precedes a file-scoped namespace declaration (N1, round 6)', () => {
+      // CS8956 — file-scoped namespace after a member. Fixture spans all four emission kinds.
+      const result = extract(`
+using Mirror;
+class InvalidPlayer : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+    [SyncVar(hook = nameof(OnHealth))] int health;
+    void OnHealth(int oldValue, int newValue) { }
+}
+namespace Later;
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when any type declaration precedes a file-scoped namespace (N1, round 6)', () => {
+      // CS8956 fires on the struct; the later class would be legal alone but the whole
+      // compilation unit is rejected, so its rows would be fabrications.
+      const result = extract(`
+using Mirror;
+struct Early { }
+namespace Later;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when file-scoped and block namespaces are mixed (N2, round 6)', () => {
+      // CS8955 — the nested block span is impossible scope, so the alias inside it must not
+      // resolve and no rows may derive from it.
+      const result = extract(`
+using Mirror;
+namespace FileScope;
+namespace Inner
+{
+    using NB = Mirror.NetworkBehaviour;
+    class Good : NB
+    {
+        public override void OnStartServer() { }
+        [Command] void Cmd() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a block namespace precedes a file-scoped declaration (N2, round 6)', () => {
+      const result = extract(`
+using Mirror;
+namespace First
+{
+    class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+namespace Second;
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a file declares two file-scoped namespaces (round 6)', () => {
+      // CS8954 — only one file-scoped namespace declaration is allowed per file.
+      const result = extract(`
+using Mirror;
+namespace A;
+namespace B;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not treat a file-scoped declaration inside #if false as an illegal mix (round 6 control)', () => {
+      // The inactive declaration is never compiled, so the block namespace stands alone — the
+      // layout check must run on the preprocessor-blanked text, not the raw source.
+      const result = extract(`
+using Mirror;
+#if false
+namespace Dead;
+#endif
+namespace Live
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    // --- Round 7 (graduation re-review): C# identifier grammar (I3-I8, A1) ---
+    // Round 6's layout check, the namespace-span scanner and the class scanner each encoded a
+    // narrower ASCII subset of C#'s identifier grammar. C# identifiers may carry a verbatim `@`
+    // prefix (`@namespace` names the type `namespace`), use Unicode letters, or use `\uXXXX`
+    // escapes — so names those scanners could not parse slipped past the illegal-layout check
+    // (fabrications I3-I8), local-shadow and alias-kill sets (adjacent fabrications), and the
+    // class parser itself (false suppression A1). One shared grammar now backs all of them, and
+    // a name the scanner still cannot decode suppresses rather than emits.
+
+    it('emits nothing when an @-escaped type precedes a file-scoped namespace (I3, round 7)', () => {
+      // CS8956 — `@EarlyType` is a type declaration even though the round-6 keyword scan could
+      // not see its name.
+      const result = extract(`
+using Mirror;
+public class @EarlyType { }
+namespace Invalid.AfterEscapedType;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a Unicode-named type precedes a file-scoped namespace (I4, round 7)', () => {
+      // CS8956 — `Ångström` is a legal C# identifier the ASCII scan missed.
+      const result = extract(`
+using Mirror;
+public class Ångström { }
+namespace Invalid.AfterUnicodeType;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a top-level statement precedes a file-scoped namespace (I5, round 7)', () => {
+      // CS8956 covers ALL members, not just type declarations — the prelude before a file-scoped
+      // namespace may hold only extern-alias/using directives and assembly/module attributes.
+      const result = extract(`
+using Mirror;
+System.Console.WriteLine("before namespace");
+namespace Invalid.AfterTopLevelStatement;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a using STATEMENT precedes a file-scoped namespace (I5-adjacent, round 7)', () => {
+      // A `using (...)` statement is a top-level statement, not a directive — it must not pass
+      // the legal-prelude whitelist.
+      const result = extract(`
+using Mirror;
+using (var f = System.IO.File.OpenRead("x")) { }
+namespace Invalid.AfterUsingStatement;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when an @-escaped file-scoped namespace mixes with a block namespace (I6, round 7)', () => {
+      // CS8955 — the file-scoped declaration's escaped name hid it from the round-6 scan.
+      const result = extract(`
+using Mirror;
+namespace @FileScoped;
+namespace Invalid.Block
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+        [Command] void Cmd() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a file-scoped namespace mixes with an @-escaped block namespace (I7, round 7)', () => {
+      const result = extract(`
+using Mirror;
+namespace Invalid.FileScoped;
+namespace @Block
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+        [Command] void Cmd() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a Unicode file-scoped namespace mixes with a block namespace (I8, round 7)', () => {
+      const result = extract(`
+using Mirror;
+namespace Ångström;
+namespace Invalid.Block
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+        [Command] void Cmd() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a namespace declaration with no parsable name (round 7)', () => {
+      // `namespace {` is uncompilable; the old scanner simply failed to see the declaration and
+      // parsed the class at global scope, emitting from an impossible unit.
+      const result = extract(`
+using Mirror;
+namespace
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still emits for a legal @-escaped class carrying Mirror surfaces (A1, round 7)', () => {
+      // False-suppression direction: `class @namespace : NetworkBehaviour` is legal C# — the
+      // class is NAMED `namespace` (the verbatim prefix is not part of the name) and must emit.
+      const result = extract(`
+using Mirror;
+namespace Legal.EscapedClass;
+public class @namespace : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer namespace.OnStartServer',
+        'UNITY attribute Command namespace.Cmd',
+      ]);
+      expect(refPairs(result)).toEqual([
+        'references:unity:host:namespace.OnStartServer',
+        'references:unity:method:namespace.Cmd',
+      ]);
+    });
+
+    it('still emits when the legal prelude holds using, extern alias and assembly attributes (round 7 control)', () => {
+      // The CS8956 check is a whitelist; everything the compiler allows before a file-scoped
+      // namespace must keep the file emitting.
+      const result = extract(`
+extern alias Vendor;
+global using System;
+using Mirror;
+using static System.Math;
+using NB = Mirror.NetworkBehaviour;
+[assembly: System.Reflection.AssemblyMetadata("k", "v")]
+[module: System.CLSCompliant(false)]
+namespace Legal.Prelude;
+
+public class Player : NB
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('suppresses a bare gated base bound by an @-escaped using-alias (round 7)', () => {
+      // `using @NetworkBehaviour = …` binds the NAME NetworkBehaviour; C# resolves Player's bare
+      // base to the alias target, not Mirror. The ASCII alias scan missed the escaped LHS and
+      // fabricated a Mirror host.
+      const result = extract(`
+using Mirror;
+using @NetworkBehaviour = Foreign.Net;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a bare gated base shadowed by an @-escaped local type (round 7)', () => {
+      // `interface @NetworkBehaviour` locally declares the NAME NetworkBehaviour, so the bare
+      // base binds to the local type — same shadow rule as the ASCII spelling.
+      const result = extract(`
+using Mirror;
+namespace N
+{
+    interface @NetworkBehaviour { }
+    class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when code carries Unicode identifier escapes (round 7)', () => {
+      // `interface \\u004EetworkBehaviour` also declares the NAME NetworkBehaviour — C# decodes
+      // \\uXXXX escapes in identifiers, this scanner cannot. Any escape surviving comment-strip +
+      // string-mask + preprocessor-blank sits in code, so every name comparison in the file is
+      // unsound: emit nothing.
+      const result = extract(`
+using Mirror;
+namespace N
+{
+    interface \\u004EetworkBehaviour { }
+    class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('ignores Unicode escapes inside strings and inactive regions (round 7 control)', () => {
+      const result = extract(`
+using Mirror;
+#if false
+class \\u0044ead { }
+#endif
+namespace Live
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+        void Log() { var s = "\\u0041"; var c = '\\u0042'; }
+    }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    // --- Round 8 (parallel adversarial panel): Cf identity, reserved keywords, remaining ASCII
+    // scanners (bases / alias targets / attribute names), prelude shape verification ---
+
+    it('suppresses when a format-character spelling locally shadows NetworkBehaviour (round 8)', () => {
+      // U+200D ZERO WIDTH JOINER sits between "Network" and "Behaviour". C# removes formatting
+      // characters (Cf) for identifier identity, so the local interface declares the NAME
+      // NetworkBehaviour and Player's bare base binds to it (the file compiles only because the
+      // second base is an interface). Emitting a Mirror host here fabricates.
+      const result = extract(`
+using Mirror;
+namespace Legal.FormatCharacter
+{
+    public interface Network‍Behaviour { }
+    public class LocalBase { }
+    public class Player : LocalBase, NetworkBehaviour
+    {
+        public void OnStartServer() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a bare base bound by a format-character alias spelling (round 8)', () => {
+      // `using Net<ZWJ>workBehaviour = …` binds the NAME NetworkBehaviour under C# identity, so
+      // the bare base resolves to the alias target, not Mirror.
+      const result = extract(`
+using Mirror;
+using Net‍workBehaviour = Foreign.Net;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('canonicalizes format characters in a host base spelling (round 8 control)', () => {
+      // The base spelled with a ZWJ IS Mirror.NetworkBehaviour under C# identity — emit.
+      const result = extract(`
+using Mirror;
+namespace Legal.FormatCharacterBase;
+public class Player : Network‍Behaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('suppresses a namespace named with an unescaped reserved keyword (round 8)', () => {
+      // `namespace class;` cannot compile (CS1001) — an unescaped reserved keyword is never an
+      // identifier, so the declaration is unparsable and the unit is suppressed.
+      const result = extract(`
+using Mirror;
+namespace class;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a class named with an unescaped reserved keyword (round 8)', () => {
+      const result = extract(`
+using Mirror;
+namespace Broken.KeywordClass;
+public class class : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a using-alias whose LHS is an unescaped reserved keyword (round 8)', () => {
+      // `using class = Mirror.NetworkBehaviour;` cannot compile; resolving Player's base through
+      // it would emit a Mirror host from a compiler-rejected unit.
+      const result = extract(`
+using Mirror;
+using class = Mirror.NetworkBehaviour;
+namespace Broken.KeywordAlias;
+public class Player : class
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('keeps rows for @-escaped reserved-keyword identifiers (round 8 control)', () => {
+      // `namespace @class;` and `class @struct` are legal — @ turns any keyword into an identifier.
+      const result = extract(`
+using Mirror;
+namespace @class;
+public class @struct : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer struct.OnStartServer',
+        'UNITY attribute Command struct.Cmd',
+      ]);
+    });
+
+    it('resolves an @-escaped direct base to the Mirror host (round 8)', () => {
+      // `class Player : @NetworkBehaviour` — the verbatim prefix is spelling, not identity; the
+      // base IS Mirror.NetworkBehaviour and the rows must not be lost.
+      const result = extract(`
+using Mirror;
+namespace Legal.EscapedBase;
+public class Player : @NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.Cmd',
+      ]);
+    });
+
+    it('resolves a using-alias whose target carries an @-escaped segment (round 8)', () => {
+      const result = extract(`
+using Mirror;
+using NB = Mirror.@NetworkBehaviour;
+namespace Legal.EscapedAliasTarget;
+public class Player : NB
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.Cmd',
+      ]);
+    });
+
+    it('recognizes an @-escaped attribute name (round 8)', () => {
+      const result = extract(`
+using Mirror;
+namespace Legal.EscapedAttribute;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [@CommandAttribute] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.Cmd',
+      ]);
+    });
+
+    it('suppresses an empty using-alias target before a file-scoped namespace (round 8)', () => {
+      // `using T = ;` is not a directive the compiler accepts (CS1031); a prelude containing it
+      // makes the file-scoped layout illegal, so nothing may be emitted.
+      const result = extract(`
+using Mirror;
+using T = ;
+namespace Invalid.EmptyAlias;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a non-type using-alias target before a file-scoped namespace (round 8)', () => {
+      // The whitelist verifies the target parses as a TYPE shape, not merely that text precedes
+      // the semicolon — `using T = 123;` cannot compile.
+      const result = extract(`
+using Mirror;
+using T = 123;
+namespace Invalid.NonTypeAlias;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses an empty assembly attribute list before a file-scoped namespace (round 8)', () => {
+      // `[assembly:]` has no attribute (CS1001) — the list must contain at least one.
+      const result = extract(`
+using Mirror;
+[assembly:]
+namespace Invalid.EmptyAssemblyAttribute;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('keeps the legal alias-any-type and attribute prelude forms (round 8 control)', () => {
+      // Every form here is compiler-legal before a file-scoped namespace: global using, a
+      // constructed-generic using static, tuple / pointer / nullable-value alias-any-type
+      // targets, and a multi-attribute assembly list with nested brackets and a trailing comma.
+      const result = extract(`
+global using Mirror;
+using static System.Collections.Generic.EqualityComparer<int>;
+using T = (int, string);
+using unsafe P = int*;
+using NV = int?;
+[assembly: Marker(new[] { 1 }), Other,]
+namespace Legal.Prelude8;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.Cmd',
+      ]);
+    });
+
+    // --- Round 9 (R8-1, Opus panel): C# 11 raw string literals must be masked — a \uXXXX escape
+    // in raw-string DATA is not an identifier escape, and raw-string content must never leak
+    // into the parse text (in either direction) ---
+
+    it('emits for a legal file whose raw string holds a \\u escape in JSON data (R8-1 J1)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string cfg = """{ "label": "\\u0041" }""";
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('emits for a raw-string regex whose quotes flip the old masker parity (R8-1 J2)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string re = """["\\u00C0-\\u017F]+""";
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits when a multi-line raw string carries quotes and a \\u escape', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string doc = """
+        { "kind": "payload", "text": "\\u0041 and "quoted" runs" }
+        """;
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits when a longer quote fence encloses a """ run plus a \\u escape', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string fence = """"inner """ quotes \\u0041"""";
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits when an interpolated raw string carries a \\u escape', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string msg = $"""hello {name} \\u0041""";
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('never fabricates from phantom declarations inside a raw string', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string payload = """
+        namespace Injected;
+        class Ghost : NetworkBehaviour { [Command] void CmdBad() { } }
+        """;
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('never fabricates when an internal quote desyncs a naive masker (GLM F1)', () => {
+      // One internal " is legal raw-string content (1 < 3). The old masker consumed it as a
+      // string terminator, leaking the Decoy text into the parse stream as real code.
+      // (Round 10: content must start below the opening fence — content on the fence line makes
+      // the literal single-line form, which cannot span lines (CS8997) and now suppresses.)
+      const result = extract(`
+using Mirror;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+    string decoy = """
+    x"
+    class Decoy : NetworkBehaviour { public override void OnStartServer() { } }
+    """;
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('emits for a raw string with one internal quote and no escapes (GLM F2b)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+    string s = """a"b""";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('emits when an interpolation hole carries a nested quoted string', () => {
+      // $"{d["key"]}" is legal C# — quotes inside a hole must not desync the masker.
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+    string s = $"value: {d["key"]} end";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('never fabricates from phantom text after a holed interpolated string', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    string s = $"{d["k"]} class Ghost : NetworkBehaviour { } bad";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits for a $$-raw JSON template with literal braces and a hole', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    string json = $$"""{ "a": {{x}}, "b": "\\u0041" }""";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('never leaks a nested raw string inside an interpolation hole', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    string s = $"""outer {x ?? """class Ghost : NetworkBehaviour { }"""} tail""";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits for a verbatim interpolated string with holes and doubled quotes', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    string s = $@"say ""hi"" to {name}";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('resolves an @-escaped base through an @-escaped alias (GLM advisory)', () => {
+      const result = extract(`
+using Mirror;
+using @NB = Mirror.NetworkBehaviour;
+namespace Game;
+public class Player : @NB
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('does not open a raw-string fence from a """ inside a comment', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+// """ this is a comment, not a fence
+class Player : NetworkBehaviour {
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('keeps code after a raw string containing comment-lookalike text', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string s = """ // not a comment " } class X """;
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('still suppresses a \\u escape in an identifier even alongside a clean raw string', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Pl\\u0061yer : NetworkBehaviour {
+    string s = """clean""";
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a file with an unterminated raw-string fence (cannot compile)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string s = """never closed;
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- SyncVar field liveness ---
+
+    it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int health;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('emits a type reference for a [SyncVar] field whose declared type is local', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData data;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.data']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.data', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('emits nothing for a STATIC [SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] static int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a [SyncVar] field on a non-NetworkBehaviour class', () => {
+      const result = extract(`
+using Mirror;
+
+class PlainHelper
+{
+    [SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing for a FOREIGN-qualified [Other.SyncVar] field (BLOCKING 3)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Other.SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('keeps an OWNING-qualified [Mirror.SyncVar] field live (BLOCKING 3)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [Mirror.SyncVar] int health;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    // --- SyncVar field type shapes (SHOULD-FIX 4) ---
+
+    it('keeps an ARRAY [SyncVar] field live (builtin element, no type ref)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int[] scores;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.scores']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.scores']);
+    });
+
+    it('references the ELEMENT type of a local-typed array [SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData[] roster;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.roster']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.roster', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('keeps a NULLABLE [SyncVar] field live', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int? health;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('references the underlying type of a local-typed nullable [SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData? data;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.data']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.data', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('keeps a GENERIC [SyncVar] field live (container is not a local type ref)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] SyncList<int> scores;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.scores']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.scores']);
+    });
+
+    it('keeps a GENERIC [SyncVar] field with a spaced multi-argument type live', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] SyncDictionary<int, string> lookup;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.lookup']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
+    it('keeps a [SyncVar] field with a GENERIC constructor initializer live (BLOCKING 4)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] Dictionary<int,string> lookup = new Dictionary<int,string>();
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.lookup']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
+    it('keeps a [SyncVar] field with a NESTED-generic constructor initializer live (BLOCKING 4)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] Dictionary<int, List<Foo>> lookup = new Dictionary<int, List<Foo>>();
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.lookup']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.lookup']);
+    });
+
+    it('emits nothing (and does not crash) for a comparison-operator initializer (BLOCKING 4)', () => {
+      // `a < b` opens an angle context that never closes before the top-level `;`, so the scan
+      // bails on the whole declaration rather than mis-splitting on the generic-looking comma.
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int x = a < b, y = 2;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits one row per name for a MULTI-DECLARATOR [SyncVar] field', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int x, y, z;
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY SyncVar field Player.x', 'UNITY SyncVar field Player.y', 'UNITY SyncVar field Player.z'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:field:Player.x',
+          'references:unity:field:Player.y',
+          'references:unity:field:Player.z',
+        ].sort()
+      );
+    });
+
+    it('emits one row per name for a MULTI-DECLARATOR [SyncVar] field with initializers', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int health = 100, shield = 50;
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY SyncVar field Player.health', 'UNITY SyncVar field Player.shield'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.health', 'references:unity:field:Player.shield'].sort()
+      );
+    });
+
+    // --- SyncVar field brace initializers / const / nullable-array / perf (BLOCKING 3, SHOULD-FIX 4/5) ---
+
+    it('keeps a [SyncVar] field with a BRACE object initializer live (BLOCKING 3)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData data = new PlayerData { Health = 100 };
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.data']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.data', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('emits nothing for a CONST [SyncVar] field (const is implicitly static; BLOCKING 3)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] const int health = 100;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('references the ELEMENT type of a nullable-array [SyncVar] field (T[]?; SHOULD-FIX 5)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData[]? roster;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.roster']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.roster', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('references the ELEMENT type of a nullable-element array [SyncVar] field (T?[]; SHOULD-FIX 5)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] PlayerData?[] roster;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.roster']);
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.roster', 'references:PlayerData'].sort()
+      );
+    });
+
+    it('keeps a JAGGED-array [SyncVar] field live (builtin element, no type ref; SHOULD-FIX 5)', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] int[][] grid;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.grid']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.grid']);
+    });
+
+    it('does not hang on an unclosed generic in an attributed field (SHOULD-FIX 4)', () => {
+      const payload = 'X'.repeat(100_000);
+      const source = `
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar] A<${payload} value;
+}
+`;
+      const start = Date.now();
+      const result = extract(source);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(2000);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    // --- Member-scan catastrophic backtracking (BLOCKING 7) ---
+
+    it('does not hang on a method preceded by many stacked attributes (BLOCKING 7)', () => {
+      // Mirrors the real trigger: a block-bodied method under ~30 stacked [TestCase(...)] lines
+      // (CRLF + tabs). The block body means the expression-bodied regex's `=>` tail never matches,
+      // forcing the full backtrack that the double-sided `\s*` attribute run blew up on (2^N).
+      const attrs = Array.from(
+        { length: 30 },
+        (_, i) => `\t[TestCase("a${i}", "=", "1", 1)]`
+      ).join('\r\n');
+      const source =
+        `using Mirror;\r\n\r\nclass Player : NetworkBehaviour\r\n{\r\n${attrs}\r\n` +
+        `\tpublic void Foo()\r\n\t{\r\n\t\tint x = 1;\r\n\t}\r\n}\r\n`;
+      const start = Date.now();
+      const result = extract(source);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(500);
+      // None of the stacked attributes are gated and Foo is not a host callback, so nothing emits —
+      // the point is that extract() COMPLETES.
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still extracts an RPC method carrying many stacked attributes (BLOCKING 7)', () => {
+      // The single-sided attribute run must still capture the whole stack into group 1, so the
+      // gated [Command] below ~30 [TestCase] lines is found and emitted.
+      const attrs = Array.from({ length: 30 }, (_, i) => `\t[TestCase("a${i}")]`).join('\r\n');
+      const source =
+        `using Mirror;\r\n\r\nclass Player : NetworkBehaviour\r\n{\r\n${attrs}\r\n` +
+        `\t[Command]\r\n\tvoid CmdMove()\r\n\t{\r\n\t}\r\n}\r\n`;
+      const start = Date.now();
+      const result = extract(source);
+      expect(Date.now() - start).toBeLessThan(500);
+      expect(nodeNames(result)).toContain('UNITY attribute Command Player.CmdMove');
+    });
+
+    // --- SyncVar hook resolution ---
+
+    it('resolves a [SyncVar(hook = nameof(Method))] hook to a unique same-class method', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY SyncVar field Player.health', 'UNITY SyncVar hook Player.OnHealthChanged'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.health', 'references:unity:method:Player.OnHealthChanged'].sort()
+      );
+    });
+
+    it('resolves a [SyncVar(hook = "Method")] string-literal hook to a unique same-class method', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = "OnHealthChanged")] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY SyncVar field Player.health', 'UNITY SyncVar hook Player.OnHealthChanged'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:field:Player.health', 'references:unity:method:Player.OnHealthChanged'].sort()
+      );
+    });
+
+    it('keeps the field live but emits no hook ref when the hook names an OVERLOADED method', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+    void OnHealthChanged(float oldValue, float newValue) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('emits no hook ref for a qualified nameof(Other.Method) hook value', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(Other.OnHealthChanged))] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('emits no hook ref when the hook names a method absent from the class block', () => {
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('emits nothing for SyncVar rows when the Mirror gate is closed by a competing stack', () => {
+      const result = extract(`
+using Mirror;
+using FishNet.Object;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+    void OnHealthChanged(int oldValue, int newValue) {}
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
     });
   });
 

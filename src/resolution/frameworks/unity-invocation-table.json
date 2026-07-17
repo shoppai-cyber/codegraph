@@ -1,9 +1,9 @@
 {
   "$schema": "https://codegraph.dev/schemas/unity-invocation-table.v0.json",
   "name": "unity-runtime-invocation-table",
-  "version": "0.3.0",
-  "target": "Unity 2021 LTS – 6.x; runtime + editor C# scripting; FishNet 4.x networking (Tier 2, gated)",
-  "status": "Fable-reviewed v1 scope plus the FishNet Tier-2 networking section. Consumed lists are grounded in the local Unity 6.5 corpus and FABLE-SCOPE-DECISIONS.md (Tier 1) and the FishNet 4.7.2 corpus verified against the validation project's 4.6.20 source (Tier 2, see resolver-facts/FISHNET-RESOLVER-FACTS.md); pending rows are explicitly marked or quarantined. Runtime consumption must stay inside the consumed sections.",
+  "version": "0.4.0",
+  "target": "Unity 2021 LTS – 6.x; runtime + editor C# scripting; FishNet 4.x and Mirror 96.x networking (Tier 2, gated)",
+  "status": "Fable-reviewed v1 scope plus the FishNet and Mirror Tier-2 networking sections. Consumed lists are grounded in the local Unity 6.5 corpus and FABLE-SCOPE-DECISIONS.md (Tier 1), the FishNet 4.7.2 corpus verified against the validation project's 4.6.20 source (Tier 2, see resolver-facts/FISHNET-RESOLVER-FACTS.md), and the Mirror 96.10.3 corpus verified against Weaver source (Tier 2, see resolver-facts/MIRROR-RESOLVER-FACTS.md); pending rows are explicitly marked or quarantined. Runtime consumption must stay inside the consumed sections.",
   "consumed": {
     "note": "Sections here are read by unity.ts at runtime; the fields consumed are named per section. Everything under catalogNotes is documentation-only provenance. This mirrors blender-invocation-table.json's consumed/catalogNotes split.",
     "detection": "DOCUMENTATION-ONLY despite sitting in this manifest: the marker list is hardcoded in unity.ts detect()/hasConcreteUnitySourceSignal — editing this section changes nothing at runtime. Describes project-level sufficient markers plus source evidence rules used to recognize a Unity project.",
@@ -12,7 +12,8 @@
     "attributeEntryPoints": "attribute → the decorated method/class is a host-invoked entry point (kept live); menu/path string captured where present",
     "typeReferenceAttributes": "attribute → typeof(X)/type argument emits a references edge to X",
     "stringInvokedCallSites": "DOCUMENTATION-ONLY despite sitting in this manifest: the call-site families (SendMessage/Invoke/StartCoroutine/ContextMenuItem) are hardcoded in unity.ts processStringCalls/processContextMenuItems — editing this section changes nothing at runtime. Describes callsite API → its string-literal method-name argument links to a sibling method (references). This mirrors how blender-invocation-table.json documents its hardcoded call-site behavior under catalogNotes.",
-    "fishnet": "gated FishNet 4.x networking rules: fishnet.gate (per-file using-based gate), fishnet.hostInvokedBases.NetworkBehaviour.hostInvokedMethods (+includesMonoBehaviourMessages union), and fishnet.attributeEntryPoints.methodAttributes (RPC/prediction entry points). Every fishnet row only fires when fishnet.gate is open in that file."
+    "fishnet": "gated FishNet 4.x networking rules: fishnet.gate (per-file using-based gate), fishnet.hostInvokedBases.NetworkBehaviour.hostInvokedMethods (+includesMonoBehaviourMessages union), and fishnet.attributeEntryPoints.methodAttributes (RPC/prediction entry points). Every fishnet row only fires when fishnet.gate is open in that file.",
+    "mirror": "gated Mirror 96.x networking rules: mirror.gate (per-file using/FQ-base gate with NGO/FishNet/Fusion disqualifiers), mirror.hostInvokedBases.NetworkBehaviour.hostInvokedMethods (+includesMonoBehaviourMessages union), mirror.attributeEntryPoints.methodAttributes (Command/ClientRpc/TargetRpc entry points), mirror.syncVarFields (non-static [SyncVar] field liveness), and mirror.syncVarHooks (hook-string method resolution). Every mirror row only fires when mirror.gate is open in that file."
   },
   "sourcePriority": [
     "kb/gamedev/unity (to be built — Unity Scripting API + Manual mirror)",
@@ -273,11 +274,13 @@
   "fishnet": {
     "note": "FishNet (Fish-Networking) 4.x consumed rules — Tier 2. NetworkBehaviour, ServerRpc, and TargetRpc collide by name with Unity Netcode for GameObjects (NGO) and Mirror, so EVERY fishnet row is gated per file (see gate). Facts are corpus-verified against FishNet 4.7.2 and re-verified against the validation project's 4.6.20 source (stable since 4.0). Runtime consumption reads gate, hostInvokedBases.NetworkBehaviour.hostInvokedMethods (unioned with MonoBehaviour messages), and attributeEntryPoints.methodAttributes. Full provenance: resolver-facts/FISHNET-RESOLVER-FACTS.md.",
     "gate": {
-      "note": "A fishnet row fires in a file ONLY when BOTH halves hold. EVIDENCE half: the file has a `using FishNet;` / `using FishNet.<...>;` directive, OR a class base written fully-qualified as `FishNet.Object.NetworkBehaviour`. EXCLUSION half: the file has NO `using Unity.Netcode<...>` and NO `using Mirror<...>` — either competing stack makes the colliding NetworkBehaviour / ServerRpc / TargetRpc tokens ambiguous, so emit nothing even when FishNet evidence is also present. Applied uniformly to every fishnet row (host bases and attribute entry points alike). Directive/base evidence is read from comment-stripped, string-masked source, so a commented or string-literal using never counts.",
+      "note": "A fishnet row fires in a file ONLY when BOTH halves hold. EVIDENCE half: the file has a real `using FishNet;` / `using FishNet.<...>;` namespace import (alias directives `using FishNet = ...;` do NOT count), OR a parsed class BASE written fully-qualified as `FishNet.Object.NetworkBehaviour` (occurrences of that token outside a base clause do NOT count). EXCLUSION half: the file has NO `using Unity.Netcode<...>`, NO `using Mirror<...>`, and NO `using Fusion<...>` — any competing stack makes the colliding NetworkBehaviour / ServerRpc / TargetRpc tokens ambiguous, so emit nothing even when FishNet evidence is also present; exclusion always wins over evidence. Applied uniformly to every fishnet row (host bases and attribute entry points alike). Directive/base evidence is read from comment-stripped, string-masked source, so a commented or string-literal using never counts.",
       "requiresAnyUsingPrefix": ["FishNet"],
       "fullyQualifiedBaseAlternative": "FishNet.Object.NetworkBehaviour",
-      "disqualifyingUsingPrefixes": ["Unity.Netcode", "Mirror"]
+      "disqualifyingUsingPrefixes": ["Unity.Netcode", "Mirror", "Fusion"]
     },
+    "attributeNamespaces": ["FishNet.Object"],
+    "attributeNamespacesNote": "The namespaces FishNet's gated attributes (ServerRpc, ObserversRpc, TargetRpc, …) actually live in — used to validate a QUALIFIED attribute spelling like [FishNet.Object.ServerRpc]. Deliberately NOT the gate prefix `FishNet`: [FishNet.ServerRpc] is a custom FishNet.ServerRpcAttribute, not the framework's, so gate namespaces and attribute-owner namespaces are separate lists (BLOCKING 2 r3).",
     "hostInvokedBases": {
       "note": "NetworkBehaviour is a GATED host base (see gate) — deliberately NOT in the top-level ungated hostInvokedBases whitelist, because the bare `NetworkBehaviour` token is shared by NGO, Mirror, and FishNet. Its host-method set is the 10 public virtual FishNet lifecycle callbacks UNIONED with the full MonoBehaviour message set: FishNet's `NetworkBehaviour : MonoBehaviour` is a framework-guaranteed chain (verified in 4.6.20 source), so Update/Awake/OnTriggerEnter/etc. are engine-invoked on it too. The union is materialised by the resolver from the MonoBehaviour entry via includesMonoBehaviourMessages, so the MonoBehaviour list stays the single source of truth (no drift).",
       "NetworkBehaviour": {
@@ -336,6 +339,80 @@
       "timeManagerEvents": ["OnTick", "OnPostTick", "OnPreTick", "OnUpdate", "OnLateUpdate", "OnFixedUpdate", "OnPostPhysicsSimulation", "OnPrePhysicsSimulation", "OnRoundTripTimeUpdated"]
     }
   },
+  "mirror": {
+    "note": "Mirror (MirrorNetworking) v96.x consumed rules — Tier 2. NetworkBehaviour, ClientRpc, and TargetRpc collide by name with Unity Netcode for GameObjects (NGO), FishNet, and Photon Fusion, so EVERY mirror row is gated per file (see gate). Facts are corpus-verified against Mirror v96.10.3 (mirror_docs.sqlite). Runtime consumption reads gate, hostInvokedBases.NetworkBehaviour.hostInvokedMethods (unioned with MonoBehaviour messages), attributeEntryPoints.methodAttributes, syncVarFields, and syncVarHooks. Full provenance: mirror-docs/96.10.3/resolver-facts/MIRROR-RESOLVER-FACTS.md.",
+    "gate": {
+      "note": "A mirror row fires in a file ONLY when BOTH halves hold. EVIDENCE half: the file has a real `using Mirror;` / `using Mirror.<...>;` namespace import (alias directives `using Mirror = ...;` do NOT count), OR a parsed class BASE written fully-qualified as `Mirror.NetworkBehaviour` (occurrences of that token outside a base clause do NOT count). EXCLUSION half: the file has NO `using Unity.Netcode<...>`, NO `using FishNet<...>`, and NO `using Fusion<...>` — a competing stack makes the colliding tokens ambiguous, so emit nothing even when Mirror evidence is also present; exclusion always wins over evidence. Applied uniformly to every mirror row. Directive/base evidence is read from comment-stripped, string-masked source.",
+      "requiresAnyUsingPrefix": ["Mirror"],
+      "fullyQualifiedBaseAlternative": "Mirror.NetworkBehaviour",
+      "disqualifyingUsingPrefixes": ["Unity.Netcode", "FishNet", "Fusion"]
+    },
+    "attributeNamespaces": ["Mirror"],
+    "attributeNamespacesNote": "The namespaces Mirror's gated attributes (Command, ClientRpc, TargetRpc, SyncVar) actually live in — used to validate a QUALIFIED attribute spelling like [Mirror.Command]. Here it coincides with the gate prefix `Mirror`, but the list is kept separate on purpose so a descendant like [Mirror.Whatever.Command] stays foreign (BLOCKING 2 r3).",
+    "hostInvokedBases": {
+      "note": "NetworkBehaviour is a GATED host base — the bare token is shared by NGO, FishNet, and Photon Fusion. Host-method set = the 12 framework-invoked overridable methods below UNIONED with the full MonoBehaviour message set (Mirror's `NetworkBehaviour : MonoBehaviour` is framework-guaranteed; union materialised via includesMonoBehaviourMessages).",
+      "NetworkBehaviour": {
+        "hostInvokedMethods": [
+          "OnStartServer", "OnStopServer",
+          "OnStartClient", "OnStopClient",
+          "OnStartLocalPlayer", "OnStopLocalPlayer",
+          "OnStartAuthority", "OnStopAuthority",
+          "OnSerialize", "OnDeserialize",
+          "SerializeSyncVars", "DeserializeSyncVars"
+        ],
+        "includesMonoBehaviourMessages": true,
+        "detection": "identical to the fishnet NetworkBehaviour rule: short form under an open gate, or fully-qualified Mirror.NetworkBehaviour as a parsed base; same-file base chains allowed when proven in-file; cross-file base chains emit nothing",
+        "note": "Ten public virtual user callbacks/custom-serialization entry points (8 OnStart*/OnStop* lifecycle + OnSerialize/OnDeserialize) PLUS the two protected virtual SyncVar-serialization overrides SerializeSyncVars/DeserializeSyncVars — the Weaver only generates those two when the subclass does NOT declare them (NetworkBehaviourProcessor.cs ~406-420/676-690), so a user override is retained and invoked via OnSerialize/OnDeserialize (NetworkBehaviour.cs ~1219-1235). EXCLUDED by role: OnValidate (already a MonoBehaviour message), Weaved (public virtual but Weaver-injected processed-marker), showSyncMethod (internal editor affordance)."
+      }
+    },
+    "attributeEntryPoints": {
+      "note": "Same semantics as fishnet.attributeEntryPoints: the decorated INSTANCE method gets entry-point liveness (self-reference), requires the declaring class provably NetworkBehaviour-based in the SAME file AND the file gate open. Static methods emit nothing. ACCURACY: Mirror user code CALLS these methods directly — the Weaver moves the original body aside and rewrites the call site's target body into a network send (MethodProcessor.cs) — so RPC methods often ALSO have real in-code callers. The synthetic self-reference SUPPLEMENTS those (remote receive dispatch reaches the method even when no in-project call site exists); it does not assert the method lacks callers.",
+      "methodAttributes": [
+        { "attribute": "Command",   "scope": "instance method", "invokedBy": "client→server remote call (Weaver-rewritten; requiresAuthority variants irrelevant to liveness)", "requiresInstance": true },
+        { "attribute": "ClientRpc", "scope": "instance method", "invokedBy": "server→all-clients remote call", "requiresInstance": true, "collidesWith": "Unity.Netcode ClientRpcAttribute (gated out by disqualifyingUsingPrefixes)" },
+        { "attribute": "TargetRpc", "scope": "instance method", "invokedBy": "server→single-client remote call", "requiresInstance": true, "collidesWith": "FishNet TargetRpcAttribute (gated out by disqualifyingUsingPrefixes)" }
+      ],
+      "referenceKind": "entry-point liveness (no target); supplements possible direct in-code callers"
+    },
+    "syncVarFields": {
+      "note": "Mirror consumes EVERY non-static field bearing [SyncVar], hook or not: the Weaver enumerates fields, recognizes SyncVarAttribute, records and rewrites each (SyncVarAttributeProcessor.cs ~445-483; static fields are a Weaver error, ~455-465). CONSUMED RULE: when the file gate is open AND the declaring class is provably NetworkBehaviour-based in the same file, a non-static [SyncVar] field gets framework-consumed field liveness — same mechanism as the existing serialization-contract field rule (the `unity:field:` reference unity.ts already emits for serialized fields). Static [SyncVar] fields emit nothing; a `const` field also emits nothing (C# makes const implicitly static, which the Weaver rejects the same way) — the const/static no-emit is exact parity. DECLARATION-SYNTAX COVERAGE: a single-pass balanced field scanner reads the type (dotted name, balanced generic <...>, and nullable ?/array ranks []/[,] interleaved in any order — T[]?, T?[], jagged) and consumes an `= initializer` (brace object initializers `= new T { ... }` included) to the top-level `;`; a malformed/unclosed declaration is skipped and the scan is length-bounded so a pathological line cannot stall extraction. COVERAGE BOUNDS (emit-nothing): cross-file-inherited fields are not walked; a generic container's element type is not extracted (SyncList<PlayerData> emits the field, no PlayerData ref).",
+      "attribute": "SyncVar",
+      "appliesTo": "non-static fields",
+      "referenceKind": "field liveness (framework-consumed serialized field)"
+    },
+    "syncVarHooks": {
+      "note": "[SyncVar(hook = nameof(Method))] / [SyncVar(hook = \"Method\")] names a change-callback resolved by Mirror's Weaver at compile time from the plain string (SyncVarAttributeProcessor.FindHookMethod). String-name dispatch — the hook method otherwise looks dead. CONSUMED RULE: gate open AND declaring class provably NetworkBehaviour-based same-file AND the hook string names a method with EXACTLY ONE declaration in the SAME class block → emit a reference keeping that method live (the field's syncVarFields liveness is separate and unconditional). EMIT NOTHING when: hook value is not a compile-time simple-identifier string/nameof (qualified forms like nameof(Other.M) included), the name is absent from the class block, the name is OVERLOADED in the class block (Mirror legally picks the 2-param signature match — we deliberately miss rather than guess; documented coverage bound), or NetworkBehaviour-ness is only provable cross-file. DOCUMENTED COVERAGE BOUNDS (deliberate missed edges, per emit-nothing): overloaded hook names; hooks whose field and method live in different partial-class blocks/files; derived-class overrides of a virtual hook (Weaver emits ldvirtftn — runtime dispatch we don't model). Mirror's own lookup searches ONLY the declaring type's methods (Extensions.cs GetMethods reads td.Methods; the parent-walking helper is a different function), so same-class-block matching is aligned with the Weaver, not narrower.",
+      "attribute": "SyncVar",
+      "argumentName": "hook",
+      "hookScope": "same class block, same file, unique non-overloaded name",
+      "weaverSource": "Assets/Mirror/Editor/Weaver/Processors/SyncVarAttributeProcessor.cs @ v96.10.3"
+    },
+    "excludedRows": {
+      "note": "Present in Mirror v96.10.3 but deliberately NOT consumed as liveness rows, per the emit-nothing policy. Deferrals are recorded, not implied-covered.",
+      "guardAttributes": {
+        "rows": ["Server", "ServerCallback", "Client", "ClientCallback"],
+        "reason": "Guard attributes — Weaver injects an early-return/warning wrapper; they do not change WHO calls the method, only whether it may run. Not framework entry points."
+      },
+      "editorAttributes": {
+        "rows": ["Scene", "ShowInInspector", "ReadOnly", "WeaverPriority"],
+        "reason": "Editor/inspector affordances and Weaver-internal reader/writer priority — no runtime dispatch of user methods."
+      },
+      "deferredHostBases": {
+        "rows": ["NetworkManager", "NetworkRoomManager", "NetworkRoomPlayer", "NetworkAuthenticator", "InterestManagement", "InterestManagementBase"],
+        "reason": "Real framework-invoked virtual surfaces (corpus: NetworkManager 32 virtuals, NetworkRoomManager 22, NetworkAuthenticator 6; Mirror calls authenticator overrides from NetworkManager.cs ~1155/1224), and all are MonoBehaviour-derived CROSS-FILE — the Tier-1 same-file base-chain rule cannot prove the chain from user code, and NetworkManager also collides by name with NGO's NetworkManager. DEFERRED as a candidate later row set (would need the same gate + per-base method lists); overrides of these virtuals in user subclasses still get normal C# override resolution when the base resolves. Do not treat as covered.",
+        "candidateTests": "user subclass of NetworkManager overriding OnServerAddPlayer under an open mirror gate"
+      },
+      "messageHandlers": {
+        "rows": ["NetworkServer.RegisterHandler<T>", "NetworkClient.RegisterHandler<T>", "NetworkClient.ReplaceHandler<T>"],
+        "reason": "Handler is passed as a method-group ARGUMENT — codegraph's general C# function-as-value capture (#756, function-ref.ts call-argument branch) already resolves same-file handlers as references edges. A mirror-specific rule would double-emit. Recorded as covered-by-general-mechanism, not omitted."
+      }
+    },
+    "eventSubscriptions": {
+      "note": "SyncObject change callbacks in Mirror are plain C# Action delegate fields subscribed with `+=` (SyncList<T>: OnChange/Callback/OnAdd/OnInsert/OnSet/OnRemove/OnClear — 7; SyncSet<T> owns its 4 directly; SyncDictionary's 5 live on its BASE class SyncIDictionary<TKey,TValue>). Method-group references, NOT string dispatch — the general function-ref mechanism (`+=` RHS) already resolves same-file handlers. Emit nothing new; a mirror-specific bridge would double-emit. Same finding and coverage bound as fishnet.eventSubscriptions.",
+      "resolverBehavior": "Emit nothing new; rely on the existing general C# function_ref mechanism.",
+      "syncTypesWithActionCallbacks": ["SyncList", "SyncSet", "SyncIDictionary", "SyncDictionary", "SyncHashSet", "SyncSortedSet"]
+    }
+  },
   "catalogNotes": {
     "documentationOnly": true,
     "note": "Not read by unity.ts at runtime. Provenance, quarantine, deferrals, and false-positive guard record for behaviors hardcoded in the resolver.",
@@ -361,9 +438,9 @@
     "deferredPackageAttributes": {
       "networking": {
         "rows": ["ClientRpc", "Rpc", "Command", "SyncVar hook"],
-        "reason": "Netcode-for-GameObjects (NGO), Mirror, and legacy UNet attributes; package-specific and name-colliding. [ClientRpc]/[Rpc] (NGO + Mirror), [Command] (Mirror/UNet), and Mirror's [SyncVar(hook=...)] have no FishNet-gated home in v1.",
-        "graduated": "FishNet's ServerRpc, ObserversRpc, TargetRpc, Replicate, and Reconcile GRADUATED to the consumed top-level `fishnet` section, which fires only behind the per-file FishNet using-gate. NGO/Mirror ServerRpc/TargetRpc are still excluded here: the fishnet gate emits nothing in any file importing Unity.Netcode or Mirror.",
-        "futureGate": "For the still-deferred NGO/Mirror/UNet rows: require package evidence such as using Unity.Netcode or using Mirror plus their NetworkBehaviour base; likely sibling gated sections mirroring the fishnet one."
+        "reason": "Remaining deferred rows are the Netcode-for-GameObjects (NGO) and legacy UNet variants of these package-specific, name-colliding attributes. Mirror's and FishNet's own copies have GRADUATED to consumed gated sections (see `graduated`); the tokens listed here now refer ONLY to the still-unconsumed NGO/UNet stacks.",
+        "graduated": "FishNet's ServerRpc/ObserversRpc/TargetRpc/Replicate/Reconcile GRADUATED to the consumed top-level `fishnet` section, and Mirror's Command/ClientRpc/TargetRpc plus [SyncVar] / [SyncVar(hook=...)] GRADUATED to the consumed top-level `mirror` section — each fires only behind its own per-file gate (a required using-prefix OR that stack's fully-qualified NetworkBehaviour base). NGO/UNet ServerRpc/ClientRpc/Command/SyncVar remain excluded here: the fishnet and mirror gates each emit nothing in any file importing a competing stack.",
+        "futureGate": "For the still-deferred NGO/UNet rows: require package evidence such as using Unity.Netcode (NGO) or the UnityEngine.Networking UNet namespace plus their NetworkBehaviour base; likely sibling gated sections mirroring the fishnet and mirror ones."
       },
       "tests": {
         "rows": ["Test", "UnityTest", "SetUp", "TearDown", "OneTimeSetUp", "OneTimeTearDown", "UnitySetUp", "UnityTearDown"],

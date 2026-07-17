@@ -108,3 +108,384 @@ unresolved-node noise, M-4 ALL-CAPS constant admitted as class, M-5 detection on
 escaped-quote literal, M-8 trailing-comma `register_class(X,)`. All edge cases; none affects the
 mainline patterns. **I-3** (work-item-6 cross-file host-callback ceiling) confirmed genuine, already
 documented above — no code change.
+
+---
+
+# CHANGES — Unity Mirror networking (Tier-2 gated resolver)
+
+Adds **Mirror (MirrorNetworking) 96.x** networking liveness to the Unity framework resolver,
+alongside the existing FishNet Tier-2 support. Same pattern as FishNet: a per-file gate keeps the
+colliding networking tokens (`NetworkBehaviour`, `[ClientRpc]`, `[TargetRpc]`) from being confused
+across stacks, and every row emits nothing unless its precondition is structurally proven in the same
+file. Corpus-verified against Mirror 96.10.3 + Weaver source (`resolver-facts/MIRROR-RESOLVER-FACTS.md`,
+in the mirror-docs database, not this repo).
+
+## Why
+
+Mirror's networking entry points are invoked by the Mirror runtime / Weaver-rewritten call sites, not
+(only) by in-project calls, so without domain knowledge they look uncalled:
+
+- `NetworkBehaviour` lifecycle/serialization callbacks — the 8 `OnStart*`/`OnStop*` (server, client,
+  local-player, authority), `OnSerialize`/`OnDeserialize`, and the `SerializeSyncVars`/`DeserializeSyncVars`
+  overrides Mirror invokes by reflection/Weaver.
+- `[Command]` / `[ClientRpc]` / `[TargetRpc]` methods — the Weaver moves the body aside and rewrites
+  the call site into a network send; the remote-receive dispatch reaches the method with no in-project
+  caller.
+- `[SyncVar]` fields — enumerated and rewritten by the Weaver; a `hook = nameof(M)` / `"M"` names a
+  change-callback resolved from a plain string, so the hook method otherwise looks dead.
+
+Because those tokens collide with NGO, FishNet, and Photon Fusion, matching them unconditionally would
+fabricate edges in a project on any of those stacks.
+
+## Files
+
+| File | Change |
+|---|---|
+| `src/resolution/frameworks/unity-invocation-table.json` | **NEW `mirror` section** — gate (NGO/FishNet/Fusion disqualifiers), `NetworkBehaviour` host callbacks + MonoBehaviour union, `attributeEntryPoints` (Command/ClientRpc/TargetRpc), `syncVarFields`, `syncVarHooks`, excluded/deferred rows, eventSubscriptions. Top-level `consumed.mirror` + version 0.3.0 → 0.4.0. |
+| `src/resolution/frameworks/unity.ts` | Consumes `TABLE.mirror` through the generic `GATED_STACKS` mechanism (added in the preceding refactor). NEW: SyncVar field + hook emission block; FQ-base stack-ownership guard so an open Mirror gate can't claim a FishNet-FQ-based class. |
+| `__tests__/unity.test.ts` | **NEW `describe('extract() — Mirror networking (Tier 2, gated)')`** — 61 cases, exhaustive `.toEqual` assertions (grown from the initial 21 by two adversarial-review hardening passes: FQ-collision/chain-ownership, raw-name attribute qualification, array/nullable/generic/multi-declarator SyncVar fields, the all-12-callback sweep, the design-v2 gate matrix, and — round 2 — same-name-across-namespace collision guard, exact-qualifier + using-alias attribute provenance, and brace-initializer / `const` no-emit / nullable-array / unclosed-generic-perf field shapes). Round 2 also added 2 FishNet-block and 2 Tier-1-block cases for the shared attribute-provenance and field-scanner fixes. |
+
+This work sits on top of two preceding commits on the same branch: a **generic-GATED_STACKS refactor**
+(generalizes the FishNet-specific gate/host/RPC code to run any number of stacks from data, no behavior
+change, all FishNet tests green) and a **gate-hardening pass** (F1–F4 below).
+
+## Design decisions
+
+- **Emit-nothing, uniformly.** Every ambiguous Mirror case emits nothing: static `[SyncVar]`,
+  overloaded hook name, qualified/non-literal hook value, hook naming an absent method, cross-file
+  base chain, cross-file SyncVar field. A missed edge beats a fabricated one — documented as coverage
+  bounds in the JSON + facts doc, not silently narrowed.
+- **Data-driven, shared mechanism.** The `mirror` JSON section is the only Mirror domain-rule source;
+  `unity.ts` reads it through the same `GATED_STACKS` runtime that serves FishNet. Adding Mirror was
+  (after the refactor) almost entirely a JSON change plus the SyncVar block the refactor left dormant.
+- **SyncVar field liveness reuses the serialized-field emission shape.** A non-static `[SyncVar]` field
+  emits the same `unity:field:` reference (plus a local-type type-ref) the Tier-1 serialized-field rule
+  already emits — no new reference kind.
+- **SyncVar hook matching is block-local — the Weaver's scope for a single-block class, deliberately
+  narrower for partial classes.** Mirror's `FindHookMethod` searches the declaring type's
+  compiler-merged method table (`td.Methods`), which spans *every* `partial` declaration of the type
+  across all files. Our resolution is scoped to the single class BLOCK the field is declared in, so for
+  a type split across multiple `partial` blocks it is strictly narrower than the Weaver: a hook whose
+  method lives in a sibling partial block resolves to nothing (emit-nothing, not a cross-block guess).
+  For the common single-block class the two scopes coincide. Overloads are deliberately not
+  disambiguated either (the Weaver picks by the 2-param signature; we won't guess a signature).
+- **RPC self-reference supplements, does not assert-uncalled.** Because Mirror RPC methods are commonly
+  called directly in user code (Weaver-rewritten call site), the synthetic entry-point reference is
+  additive to any real callers.
+- **FQ base pins to its owning stack.** A class based on a fully-qualified `X.NetworkBehaviour` is
+  claimed only by the stack whose `fullyQualifiedBaseAlternative` matches, and only when that stack's
+  gate is open — so activating Mirror does not let an open Mirror gate claim a class rooted in
+  `FishNet.Object.NetworkBehaviour` (regression-locked by the preserved FishNet characterization test).
+
+## Gate-hardening (F1–F4, preceding commit, shared across all gated stacks)
+
+- **F1** — the FishNet gate now also disqualifies on Photon Fusion (`using Fusion`), matching the
+  Mirror gate's disqualifier set.
+- **F2** — the fully-qualified base alternative is matched against **parsed base clauses only**, not a
+  file-wide token search: `X.NetworkBehaviour` as a field type no longer opens a gate.
+- **F3** — the required/disqualifying `using` regexes reject **alias directives**
+  (`using Mirror = …;`): an alias is not a namespace import, and does not open (or close) a gate.
+- **F4** — the host-base loader filters documentation-only keys (`note`, `detection`) out of each
+  stack's host-base rule set, so a doc key can't be read as a host base.
+
+## r3 — post-review conservative pass (adversarial re-review round 3)
+
+Round 3 rejected the round-2 fixes as unsafe as a set: two residual false edges and two
+regressions the round-2 fixes introduced. All four are closed by narrowing scope, never widening
+it — when C# scope can't be modeled cheaply, emit nothing and document the bound.
+
+- **Chain propagation only through bare-written bases.** A dotted external base (`Other.Root`) was
+  shortened to its last segment before the same-file name-chain lookup, so it inherited an unrelated
+  local `Root`'s networking ownership. Now a base drives the chain only when its full form carries no
+  dot; owning fully-qualified bases (`Mirror.NetworkBehaviour`) are still admitted directly. Missed
+  edge: a genuine same-file chain written through a dotted alias is not followed.
+- **Partial classes merge; nested classes never participate.** The round-2 flat class-name count
+  treated valid `partial` blocks and nested/top-level name reuse as ambiguous and dropped classes
+  that chained through them. All-partial blocks of a name are one compiler type (merged, ambiguous
+  only on conflicting direct evidence); a class declared inside another class body is excluded from
+  the top-level name map entirely. Genuine multi-namespace duplicates stay ambiguous.
+- **Angle-aware initializer scan.** The field scanner balanced only `()[]{}`, so a generic
+  constructor comma (`new Dictionary<int,string>()`) was read as a declarator separator and the field
+  was dropped. It now tracks angle-bracket depth; a top-level `;` reached with an open angle context
+  (a comparison operator such as `a < b`) bails the whole declaration. Missed edge: initializers whose
+  `<`/`>` are comparison operators are skipped.
+- **Attribute aliases KILL; attribute-owner namespaces are their own list.** Using-alias directives
+  are parsed token-wise anywhere in the file; if any alias binds a gated attribute token's name (with
+  or without the `Attribute` suffix), bare `[ThatToken]` is rejected file-wide — no target resolution,
+  including an owning-stack target (a documented missed edge; a qualified `[Mirror.Command]` still
+  emits). Qualified spellings validate against a dedicated `attributeNamespaces` list (Mirror →
+  `Mirror`; FishNet → `FishNet.Object`), not the gate prefixes, so `[FishNet.ServerRpc]` (a custom
+  attribute) no longer emits while `[FishNet.Object.ServerRpc]` still does.
+- **Known bound — duplicated-name direct-emission collapse (SHOULD-FIX 5).** Node names are
+  namespace-free by resolver-wide design, so two same-named classes whose members ALSO share names
+  collapse to a single row at the first declaration's line. The row is real (not a fabricated edge);
+  the second directly-proven declaration is simply not separately represented. Pinned by a regression
+  test.
+
+## r5 — no-fabrication hardening (adversarial re-review round 4)
+
+Round 4 found that simple-name matching without a C# name-identity model still fabricated edges on
+five paths. Every fix moves in one direction: when type identity is uncertain, **emit nothing** — a
+missed edge is acceptable, a fabricated edge is the defect. None builds a namespace resolver; each
+poisons the bare-name chain (or kills the bare token) on ambiguity.
+
+- **Partial merge is namespace-aware (BLOCKING 1).** All-partial blocks of one simple name are merged
+  as a single compiler type ONLY when they share an enclosing-namespace label; two one-part partial
+  `Root`s in different namespaces are unrelated types, so the name is poisoned. Missed edge: a genuine
+  cross-namespace partial we can't confirm equal is left unlinked.
+- **Any same-named non-class type poisons the chain (BLOCKING 2).** A same-simple-name `interface`/
+  `struct`/`enum`/`record` competes as a base-list target under C#'s scoped resolution, which the
+  bare-name lookup can't model. Its presence marks the name ambiguous, so a networked class of that
+  name can no longer be the sole donor.
+- **The attribute KILL keys on the alias LHS only (BLOCKING 3).** The bare-attribute KILL set is built
+  from every `using <Name> = …;` LHS regardless of the target shape (`global::`, extern `::`, dotted,
+  generic), so an alias with a `global::Other.CommandAttribute` target still kills bare `[Command]`.
+  The base-resolution alias map (below) intentionally drops those targets, so it can no longer be the
+  KILL source without re-leaking.
+- **Base aliases with two distinct bindings are unresolved (BLOCKING 4).** The base-resolution alias
+  map now resolves a name only when it has exactly one distinct binding file-wide; a namespace-scoped
+  alias rebound differently in another namespace is ambiguous and left unresolved, so it can never
+  last-wins a class onto a foreign owning base. Missed edge: a legitimately scoped alias is not
+  followed either. (Superseded in r6: resolution is now positional and namespace-scoped — exactly one
+  distinct *active, visible* target at the use site — which keeps this guarantee while restoring
+  legitimately scoped aliases.)
+- **Locally-declared types shadow bare gated tokens (BLOCKING 5).** A bare `: NetworkBehaviour` or
+  `[Command]` is suppressed when the file locally declares a type of that name (`class NetworkBehaviour
+  {}`, `class CommandAttribute {}`) — C# binds the bare token to the local type, not the framework's,
+  so emitting a gated row would be a fabrication. A qualified/FQ spelling is unaffected; a host class
+  whose non-shadowed callbacks are live still emits them (the kill is surgical).
+- **Gate `using` recognition is token-wise (SHOULD-FIX 3).** Required/disqualifying `using` detection
+  is no longer anchored to physical line start, so a mid-line competitor (`using Mirror; using
+  FishNet.Object;`) still fires its exclusion and a `global using Mirror;` still opens the gate.
+- **Shift operators are not generic openers (SHOULD-FIX 2).** The initializer scanner recognizes
+  `<<`/`>>`/`>>>` as shift operators, so a valid `[SyncVar] int x = a << 2;` no longer bails. The bail
+  frontier is now only a lone `<` comparison and an unclosed generic.
+- **Base-less sibling partial blocks are classified (SHOULD-FIX 1).** A base-less block of a merged
+  all-partial type inherits the merged host descriptor, so members declared in a sibling block that
+  lacks the base clause are live.
+- **Known bound — inactive-`#if` alias KILL (CONSIDER 1).** *(Resolved in r6.)* The masked source now
+  evaluates preprocessor conditions: provably-inactive regions are blanked before alias parsing, so a
+  `using` alias inside `#if false` no longer enters the KILL set. An alias under an *unknown* symbol
+  (`#if SOME_DEFINE`) still kills — potentially-active text errs toward silence.
+
+## r6 — scope & preprocessor correctness (adversarial re-review round 5, graduation)
+
+Round 5 rejected the r5 state (tip `c113cfa`, 178 green tests) on three fabrication families:
+alias-parser fallback (B1), namespace-scoped alias leakage (B2), and preprocessor-blind gating (B3).
+All three reproduced by executable probe at the tip; 18 regression tests added first (12 red),
+then fixed. Direction unchanged: uncertain identity or scope → emit nothing.
+
+- **Unresolvable alias targets kill their bare token (B1).** The alias parser drops `global::` and
+  extern-`::` targets it cannot positively resolve; previously the bare LHS token then fell through
+  to gated/Tier-1 classification (`using NetworkBehaviour = global::Foreign.Net.NetworkBehaviour;`
+  fabricated a Mirror host). Alias-bound LHS names now shadow the bare token in host classification
+  (both gated and Tier-1 branches) and poison the same-file base chain. A bare survivor of alias
+  resolution means C# binds it to the alias, not the framework — so it emits nothing. A resolvable
+  same-scope alias (`using NB = Mirror.NetworkBehaviour;`) still expands and emits.
+- **Alias resolution is positional and namespace-scoped (B2).** Alias declarations record their
+  innermost enclosing namespace span; a use site resolves only against aliases whose span contains
+  it, requiring exactly one distinct active visible target. An alias declared in `namespace A` no
+  longer binds a base in `namespace B` (file-wide application fabricated cross-namespace ownership).
+  Block-scoped and file-scoped (`namespace X;`) forms covered; same-scope controls unchanged.
+- **Preprocessor-aware gating with asymmetric semantics (B3).** A three-state line analysis
+  (active / unknown / inactive) evaluates `#if`/`#elif`/`#else`/`#endif` with a deliberately tiny
+  provability model: literals, `!`, parentheses, and in-file `#define`/`#undef` (a define under an
+  unknown region taints its symbol). Gate **evidence** requires provably-active text — `using
+  Mirror;` inside `#if false` or under an unknown build symbol (`#if UNITY_SERVER`) opens nothing.
+  Gate **exclusion** fires from potentially-active text (active + unknown) — a competing stack's
+  `using` under an unknown region still closes the gate. Provably-inactive regions and directive
+  lines are blanked (offset-preserving) before all parsing, so inactive text can no longer feed
+  aliases, kills, or FQ-base evidence; the `#else` of `#if false` is correctly active. Both
+  asymmetry directions favor emit-nothing.
+
+## r7 — illegal namespace layouts (adversarial re-review round 6)
+
+Round 6 (independent Codex sol-xhigh review of the r6 state) confirmed B1/B2/B3 closed, dist
+parity, and doc counts, then REJECTED on two new fabrication families: rows emitted from
+compilation units the C# compiler rejects outright.
+
+- **Compiler-rejected namespace layouts emit nothing, file-wide (N1/N2).** A file whose namespace
+  layout can't compile has no framework-invoked members, and the scanner's namespace spans are
+  meaningless on it — so `parseClassBlocks` returns no classes at all when the
+  preprocessor-blanked text contains: a file-scoped `namespace X;` preceded by any type
+  declaration (CS8956 — N1), file-scoped and block namespaces mixed in either order (CS8955 —
+  N2), or a second file-scoped declaration (CS8954). A file-scoped declaration inside `#if false`
+  is blanked before the check and never counts. The type-keyword pre-scan errs toward
+  suppression (a keyword-shaped token before the declaration marks the file illegal even where
+  the compiler's first error would differ) — a missed edge, never a fabricated one.
+  *(Superseded in r8: the r7 keyword/name scan itself encoded an ASCII-only identifier subset and
+  a type-keyword blacklist; escaped/Unicode identifiers and top-level statements walked past it.
+  r8 replaces it with a name-agnostic keyword scan plus a legal-prelude whitelist.)*
+
+## r8 — C# identifier grammar unification (adversarial re-review round 7)
+
+Round 7 (fresh independent Codex sol-xhigh review of the r7 state) confirmed B1/B2/B3 and the
+prior 23-fixture suite stayed closed, then REJECTED on the identifier grammar: the r7 layout
+check, the namespace-span scanner and the class scanner each encoded a different ASCII-only
+subset of C#'s identifier grammar, and every gap between those subsets was a hole. Six
+fabrication fixtures (all compiler-receipted: CS8956 ×3, CS8955 ×3) and one clear-cut legal-file
+suppression were demonstrated.
+
+- **One shared identifier grammar (`CS_ID`).** C# identifiers may carry a verbatim `@` prefix
+  (spelling, not identity: `@namespace` names the type `namespace`) and Unicode
+  letters/digits/marks. All name scanners — namespace declarations, class names, non-class type
+  names, using-alias left-hand sides — now share one grammar, and every stored name is
+  canonicalized (verbatim prefix stripped) so an escaped spelling can no longer slip past
+  shadow/kill sets (`using @NetworkBehaviour = …` kills the bare token; `interface
+  @NetworkBehaviour` shadows it) or suppress a legal class (`class @namespace :
+  NetworkBehaviour` emits — the round-7 false suppression).
+- **Name-agnostic layout classification.** Namespace declarations are found by the `namespace`
+  KEYWORD (spelling-exact — never `@namespace`, never a fragment of a longer identifier) plus
+  the following `{`/`;` delimiter, shared by the span scanner and the layout check so the two
+  can never disagree. A declaration whose name doesn't parse (`namespace {`, undecodable
+  spellings, truncated declarations) marks the file illegal — suppression, never a guess.
+- **CS8956 by whitelist, not blacklist.** The compiler allows only extern-alias directives,
+  using directives and assembly/module attribute lists before a file-scoped namespace; ANY other
+  leading construct — a type declaration in any spelling, a top-level statement, a `using (…)`
+  STATEMENT — now marks the layout illegal. The r7 blacklist could only reject spellings it
+  could parse.
+- **Unicode-escape guard.** A `\uXXXX`/`\UXXXXXXXX` escape surviving comment-strip + string-mask
+  + preprocessor-blank sits in code — a Unicode-escaped identifier the scanner cannot decode
+  (`interface N…` can declare the NAME NetworkBehaviour). Every name comparison in such a
+  file is unsound, so the whole file emits nothing. Escapes inside strings, char literals,
+  comments and inactive regions are already masked and never trigger the guard.
+  *(Round-8 review falsified the last sentence for C# 11 raw strings — the old masker had no
+  `"""` awareness, so raw-string data DID reach the guard. Closed in r9 by the literal lexer;
+  the sentence is true again as of r9.)*
+
+## r9 — identifier identity, reserved keywords, prelude shape, and a C# literal lexer (adversarial re-review round 8, parallel panel)
+
+Round 8 ran as a three-reviewer parallel panel on commit `dfea637` — independent Codex
+(sol-xhigh), GLM, and Opus reviewers, each instructed to probe to exhaustion rather than stop at
+the first REJECT. All three REJECTED, together demonstrating four independent defect classes
+(every one with an executable repro; Codex's carried dotnet compiler receipts):
+
+1. **Cf formatting characters broke identity** (Codex ID10). ECMA-334 §6.4.3 REMOVES Unicode
+   formatting characters (Cf, e.g. U+200D ZWJ) for identifier comparison; the scanner compared
+   them verbatim, so `interface Net‍workBehaviour` did not shadow `NetworkBehaviour` —
+   fabrication. `canonicalIdName` now strips `\p{Cf}` (combining marks Mn/Mc are retained —
+   C# does not NFC-normalize).
+2. **Reserved keywords accepted as identifiers** (Codex ID11, plus neighbors). `namespace
+   class;`, `class class`, `using class = …;` all emitted rows from compiler-rejected units. A
+   77-entry `RESERVED_KEYWORDS` set (contextual keywords like `record`/`var` excluded — those
+   CAN be identifiers) is now enforced at every identifier-required position the scanner
+   consumes: namespace segments, class names, alias LHS/RHS segments, import/extern segments,
+   attribute name segments.
+3. **Three scanners still spoke ASCII** (Codex ID13/ID14/ID15). Base clauses, alias targets, and
+   attribute names didn't know the shared grammar, so `: @NetworkBehaviour`, `using NB =
+   Mirror.@NetworkBehaviour;`, and `[@CommandAttribute]` were falsely suppressed/dropped. All
+   three now use `CS_ID`/`CS_QID` with per-segment canonicalization.
+4. **Prelude whitelist matched prefixes, not shapes** (Codex P7/P8). `using T = ;` and
+   `[assembly:]` cannot compile but passed the r8 whitelist and emitted. Two shape validators —
+   `isShapeValidType` (recursive-descent: qualified names, type args, tuples, pointer/nullable/
+   array suffixes, builtin-keyword atoms) and `isShapeValidAttributeList` (≥1 attribute,
+   balanced args, trailing comma) — now verify prelude directives to token level.
+5. **Raw string literals were not lexed** (Opus R8-1; GLM F1/F2 — the panel's headline). The old
+   character-at-a-time masker parsed `"""` as `""` + a new string, so one internal quote (legal
+   raw-string content) desynchronized it: string DATA leaked into the parse text (GLM's
+   fabricated `class Decoy : NetworkBehaviour` from inside a literal) or code was consumed as
+   string content (Opus's legal JSON/regex raw strings with `\u` sequences tripping the escape
+   guard — whole legal files suppressed). Replaced with `maskCSharpLiterals`, a single-pass C#
+   literal lexer that knows every lexical form — line/block comments, preprocessor directive
+   lines, char literals, regular/verbatim/interpolated/raw strings, `$$"""` fences, and
+   interpolation holes with recursively-lexed nested literals — and emits two offset-aligned
+   views: `code` (literals + comments + freeform directive tails blanked) for the parse passes,
+   `text` (literals kept) for string-content readers (Invoke linking, SyncVar hooks,
+   ContextMenuItem). An unterminated or unsoundly-lexable literal returns null → the whole file
+   emits nothing. This also closed a pre-existing desync: freeform directive text (`#region
+   don't`) could open a phantom char/string literal in the old pipeline.
+
+**Fabrication boundary (documented so review judges a satisfiable standard).** An emission is
+*fabricated* when the scanner's IDENTITY or SCOPE reasoning is unsound for the emitted row —
+name identity (escapes, Cf, keywords), declaration scope (namespaces, aliases, shadows, kills),
+file-scoped-namespace layout legality, and literal/comment/directive lexing are all in scope,
+and any error there suppresses. Expression-level compile errors (attribute argument expressions,
+method bodies, interpolation-hole contents) are OUTSIDE scanner scope: a regex scanner cannot
+verify whole-file compilability, and rows from such files are not fabrications provided the
+identity/scope reasoning for the row itself is sound.
+
+## r10 — directive-line lexing, excluded-region skipping, raw-string layout grammar (adversarial re-review round 9, partitioned panel)
+
+Round 9 ran as a partitioned three-reviewer panel on commit `4e4d4bc` (Codex sol-xhigh on the
+lexer, GLM on identity/scope, Opus on the preprocessor). Codex and Opus REJECTED; GLM raised one
+LOW identity finding. Every fix below was legality-receipted with dotnet 10.0.301 / C# 12 before
+implementation (a 15-case `-p:Case=` compiler harness, extending Codex's round-9 pattern), and
+every fix landed with red-first regression tests in `__tests__/unity-round10.test.ts` (31 cases,
+22 red at `4e4d4bc`):
+
+1. **Kept-directive tails were never comment-lexed** (Codex F1, CRITICAL — subsumes Opus F1;
+   fixtures PP02/03/07–11). `#if false // note` reached the condition evaluator with the comment
+   attached → 'unknown' instead of false → a provably-dead region stayed in the parse text —
+   fabrication; and an odd quote inside a kept directive's `//` comment desynchronized
+   `maskStringLiterals` — legal-file suppression. `lexDirectiveLine` now lexes every kept
+   directive's tail: `//` comments are blanked in both views before the condition is tracked,
+   and a quote or block comment in the tail (CS1025 — only `//` may follow a directive)
+   suppresses the file.
+2. **Excluded regions were still lexed** (Opus F2; receipts PPDeadUnterminatedString/RawFence).
+   An unterminated literal inside `#if false` is legal C# (excluded text is never compiled) but
+   nulled the lexer — legal-file suppression. The lexer now runs its own `createPpTracker` (the
+   same tracker `analyzePreprocessor` uses, so region states always agree) and BLANKS provably
+   inactive regions line-by-line without lexing them, keeping only nested conditional directives
+   intact for state tracking.
+3. **Compound `#if` conditions were always 'unknown'** (Opus advisory; receipts
+   PPCompoundFalse/PPCompoundTrueOr). `#if false && ANYTHING` is provably false. The condition
+   evaluator now folds top-level `||`/`&&` tri-state: one provably-true disjunct or
+   provably-false conjunct decides the expression; undecidable operands keep it unknown.
+4. **Raw interpolation brace-run grouping was wrong in both directions** (Codex F2/F4; fixtures
+   IR03–05, IR10/11, IN09). Legal opening runs of N+1..2N−1 braces (outer braces are content,
+   innermost N open the hole) were nulled — suppression; runs ≥ 2N (CS9006), unmatched closing
+   runs ≥ N in content (CS9007), and a lone `}` in normal interpolation (CS8086) were accepted —
+   emission from uncompilable source. All four boundaries now match the receipted grammar.
+5. **Raw-string layout was not validated** (Codex F3; fixtures R08–R12). The old scanner
+   accepted any closing run ≥ fence anywhere. The rewrite distinguishes single-line form
+   (content on the fence line; a newline before the close is CS8997) from multiline form
+   (closing fence alone on its own line — CS9000, including a hole ending on that line; every
+   content line led by the closing fence's whitespace prefix — CS8999; whitespace-only lines
+   may stop short but must agree in KIND — CS9003; overlong close runs are CS8998; lines
+   starting inside an interpolation hole are exempt — all receipted, including the exemptions).
+6. **Leading-Cf base tokens were canonicalized onto real names** (GLM F-LOW-1). A base-clause
+   segment starting with a Cf char (e.g. ZWJ) is not a legal identifier (the START class
+   [\p{L}\p{Nl}_] excludes Cf) but `resolveBaseFull` stripped the Cf and resolved the residual name —
+   identity-unsound emission. The one ungated canonicalization site now rejects leading-Cf
+   segments (the retained Cf fails every downstream lookup → suppression); interior Cf still
+   canonicalizes (round-8 identity preserved).
+7. **`#` after form-feed/VT was not a directive to the lexer** (Opus advisory; receipts
+   FormFeedIf/FormFeedRegion). `atLineStart` accepted only space/tab while
+   `analyzePreprocessor`'s `^\s*#` accepted any whitespace — desync (an unblanked freeform tail
+   could reach later passes). The lexer now treats every non-newline whitespace char as line-
+   leading, matching the compiler.
+
+One legacy fixture updated: the round-6 GLM-F1 desync test opened its raw string with content on
+the fence line and then spanned lines — single-line form crossing a newline is CS8997-illegal,
+which r10 now correctly suppresses; the fixture's content moved below the fence (same desync
+scenario, legal spelling). Known stale expectations in frozen reviewer probe suites (fixtures
+kept verbatim for provenance): Codex round-9 PP04 (`#if false /* c */` — Codex's own review
+corrected this to CS1025-illegal, so suppression is right), round-5 P6 (`#if true && true` —
+now provably true by design, active `using Mirror;` correctly emits), GLM F-RG-19 (alias-only
+gate evidence — documented coverage bound, a miss not a fabrication).
+
+## Verification
+
+- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts __tests__/unity-round10.test.ts`:
+  **279 passed / 279** (unity.test.ts 212, unity-assets.test.ts 36, unity-round10.test.ts 31 — the
+  round-10 suite: 22 red at `4e4d4bc`, all green post-fix). Round 4 added 11 Mirror-gated cases (one per BLOCKING
+  and SHOULD-FIX) and rewrote two tests whose fixtures were invalid C# or documented the pre-fix bug:
+  the same-named-struct case now asserts the poison (emit nothing), and the base-less-partial case now
+  asserts the sibling block's members are live. Round 5 added 18 B1/B2/B3 regression cases (12 red at
+  tip `c113cfa`); round 6 added 6 N1/N2 illegal-namespace-layout cases (5 red); round 7 added 14
+  identifier-grammar cases (12 red); round 8/9 added 32 cases across the panel's four defect classes
+  (12 + 8 red at `dfea637`, the rest controls). (Round 1 was 97; round 2 → 114; round 3 → 131 for
+  unity.test.ts; round 4 → 142; round 5 → 160; round 6 → 166; round 7 → 180; round 9 → 212.)
+  `__tests__/blender.test.ts`: **32 passed / 32** (control, no regression).
+- `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**. Built-`dist/` probe: all B1/B2/B3
+  fabrication cases emit nothing; all controls emit (source/dist parity).
+- **Corpus verification (Mirror 96.10.3, `mirror_docs.sqlite`): ZERO corrections.** All 12 host
+  callbacks, `NetworkBehaviour : MonoBehaviour`, the 3 RPC + guard + editor attribute classes,
+  `SyncVarAttribute.hook`, the deferred host-base virtual counts, and the SyncObject Action-callback
+  surfaces match the JSON exactly. Weaver `FindHookMethod`/`ProcessSyncVar` signatures confirmed.
+- **Source verification (Mirror v96.11.0, official tag @ `370582a36f6f2cac05669634b924c3da3cab7ac4`):
+  ZERO corrections.** Every consumed rule re-verified against the release source — 12 host-invoked
+  virtuals (no additions), the exact 12-attribute universe, Weaver static-SyncVar rejection,
+  same-declaring-type `FindHookMethod`, and conditional `SerializeSyncVars`/`DeserializeSyncVars`
+  generation all hold; the release's `NetworkTime` breaking change touches no consumed row. Full
+  record: `docs/validation/mirror-resolver-v96.11.0.md`.
