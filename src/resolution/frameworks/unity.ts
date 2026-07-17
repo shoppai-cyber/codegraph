@@ -824,6 +824,34 @@ function namespaceSpans(safe: string): Array<{ name: string; start: number; end:
   return spans;
 }
 
+// A compilation unit whose namespace layout the C# compiler rejects cannot produce any
+// framework-invoked member, and the scanner's namespace spans are meaningless on it — every row
+// derived from them would be a fabrication (N1/N2, round 6). Runs on the comment-stripped,
+// string-masked, preprocessor-blanked text, so an inactive `#if false` declaration never counts.
+// Illegal shapes (each maps to a compiler error): a file-scoped declaration preceded by any type
+// declaration (CS8956), file-scoped mixed with block namespaces in either order (CS8955), and
+// more than one file-scoped declaration (CS8954). The type-keyword scan errs toward suppression:
+// a keyword-shaped token before the declaration marks the file illegal even if the compiler would
+// have found a different first error — a missed edge, never a fabricated one.
+function illegalNamespaceLayout(safe: string): boolean {
+  const regex = /\bnamespace\s+[A-Za-z_][\w.]*\s*([{;])/g;
+  let firstFileScoped = -1;
+  let hasBlock = false;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(safe)) !== null) {
+    if (match[1] === ';') {
+      if (firstFileScoped !== -1) return true; // second file-scoped declaration (CS8954)
+      firstFileScoped = match.index;
+    } else {
+      hasBlock = true;
+    }
+  }
+  if (firstFileScoped === -1) return false;
+  if (hasBlock) return true; // mixed forms, either order (CS8955)
+  const before = safe.slice(0, firstFileScoped);
+  return /\b(?:class|struct|interface|enum|delegate|record)\s+[A-Za-z_]/.test(before); // CS8956
+}
+
 function namespaceLabelAt(spans: Array<{ name: string; start: number; end: number }>, index: number): string {
   return spans
     .filter((s) => s.start <= index && index <= s.end)
@@ -890,6 +918,10 @@ function parseClassBlocks(
   // from the parse text — an `#if false` block is not compiled, exactly like a comment.
   const pp = analyzePreprocessor(masked);
   const safe = pp.text;
+  // Compiler-rejected namespace layout → the whole file emits nothing (N1/N2, round 6).
+  if (illegalNamespaceLayout(safe)) {
+    return { classes: [], openStacks: [], killedAttrNames: new Set() };
+  }
   const nsSpans = namespaceSpans(safe);
   const aliasDecls = parseAliasDecls(safe, nsSpans, pp.stateAt);
   const resolveAlias = makeAliasResolver(aliasDecls);

@@ -2557,6 +2557,114 @@ public class Player : NetworkBehaviour
       expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
     });
 
+    // --- Round 6 (graduation re-review): illegal namespace layouts (N1/N2) ---
+    // A compilation unit the C# compiler rejects cannot produce framework-invoked members, so the
+    // resolver must emit NOTHING for the whole file. CS8956: a file-scoped namespace must precede
+    // all other members; CS8955: file-scoped and block namespaces cannot mix; CS8954: only one
+    // file-scoped namespace per file. The scanner's namespace spans are meaningless on such input,
+    // so any row derived from them is a fabrication.
+
+    it('emits nothing when a class precedes a file-scoped namespace declaration (N1, round 6)', () => {
+      // CS8956 — file-scoped namespace after a member. Fixture spans all four emission kinds.
+      const result = extract(`
+using Mirror;
+class InvalidPlayer : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+    [SyncVar(hook = nameof(OnHealth))] int health;
+    void OnHealth(int oldValue, int newValue) { }
+}
+namespace Later;
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when any type declaration precedes a file-scoped namespace (N1, round 6)', () => {
+      // CS8956 fires on the struct; the later class would be legal alone but the whole
+      // compilation unit is rejected, so its rows would be fabrications.
+      const result = extract(`
+using Mirror;
+struct Early { }
+namespace Later;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when file-scoped and block namespaces are mixed (N2, round 6)', () => {
+      // CS8955 — the nested block span is impossible scope, so the alias inside it must not
+      // resolve and no rows may derive from it.
+      const result = extract(`
+using Mirror;
+namespace FileScope;
+namespace Inner
+{
+    using NB = Mirror.NetworkBehaviour;
+    class Good : NB
+    {
+        public override void OnStartServer() { }
+        [Command] void Cmd() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a block namespace precedes a file-scoped declaration (N2, round 6)', () => {
+      const result = extract(`
+using Mirror;
+namespace First
+{
+    class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+namespace Second;
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('emits nothing when a file declares two file-scoped namespaces (round 6)', () => {
+      // CS8954 — only one file-scoped namespace declaration is allowed per file.
+      const result = extract(`
+using Mirror;
+namespace A;
+namespace B;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not treat a file-scoped declaration inside #if false as an illegal mix (round 6 control)', () => {
+      // The inactive declaration is never compiled, so the block namespace stands alone — the
+      // layout check must run on the preprocessor-blanked text, not the raw source.
+      const result = extract(`
+using Mirror;
+#if false
+namespace Dead;
+#endif
+namespace Live
+{
+    public class Player : NetworkBehaviour
+    {
+        public override void OnStartServer() { }
+    }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
     // --- SyncVar field liveness ---
 
     it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {

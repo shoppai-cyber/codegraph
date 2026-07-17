@@ -298,15 +298,32 @@ then fixed. Direction unchanged: uncertain identity or scope → emit nothing.
   aliases, kills, or FQ-base evidence; the `#else` of `#if false` is correctly active. Both
   asymmetry directions favor emit-nothing.
 
+## r7 — illegal namespace layouts (adversarial re-review round 6)
+
+Round 6 (independent Codex sol-xhigh review of the r6 state) confirmed B1/B2/B3 closed, dist
+parity, and doc counts, then REJECTED on two new fabrication families: rows emitted from
+compilation units the C# compiler rejects outright.
+
+- **Compiler-rejected namespace layouts emit nothing, file-wide (N1/N2).** A file whose namespace
+  layout can't compile has no framework-invoked members, and the scanner's namespace spans are
+  meaningless on it — so `parseClassBlocks` returns no classes at all when the
+  preprocessor-blanked text contains: a file-scoped `namespace X;` preceded by any type
+  declaration (CS8956 — N1), file-scoped and block namespaces mixed in either order (CS8955 —
+  N2), or a second file-scoped declaration (CS8954). A file-scoped declaration inside `#if false`
+  is blanked before the check and never counts. The type-keyword pre-scan errs toward
+  suppression (a keyword-shaped token before the declaration marks the file illegal even where
+  the compiler's first error would differ) — a missed edge, never a fabricated one.
+
 ## Verification
 
-- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **196 passed / 196**
-  (unity.test.ts 160, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
+- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **202 passed / 202**
+  (unity.test.ts 166, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
   and SHOULD-FIX) and rewrote two tests whose fixtures were invalid C# or documented the pre-fix bug:
   the same-named-struct case now asserts the poison (emit nothing), and the base-less-partial case now
   asserts the sibling block's members are live. Round 5 added 18 B1/B2/B3 regression cases (12 red at
-  tip `c113cfa`). (Round 1 was 97; round 2 → 114; round 3 → 131 for unity.test.ts; round 4 → 142;
-  round 5 → 160.) `__tests__/blender.test.ts`: **32 passed / 32** (control, no regression).
+  tip `c113cfa`); round 6 added 6 N1/N2 illegal-namespace-layout cases (5 red). (Round 1 was 97;
+  round 2 → 114; round 3 → 131 for unity.test.ts; round 4 → 142; round 5 → 160; round 6 → 166.)
+  `__tests__/blender.test.ts`: **32 passed / 32** (control, no regression).
 - `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**. Built-`dist/` probe: all B1/B2/B3
   fabrication cases emit nothing; all controls emit (source/dist parity).
 - **Corpus verification (Mirror 96.10.3, `mirror_docs.sqlite`): ZERO corrections.** All 12 host

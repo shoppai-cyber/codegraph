@@ -1,7 +1,8 @@
 # Mirror resolver validation record — Mirror v96.11.0
 
 Date: 2026-07-16
-Resolver branch: `worktree-agent-aee2f98c11370f812` (round 5, commit `129723f` on top of tip `c113cfa`)
+Resolver branch: `worktree-agent-aee2f98c11370f812` (rounds 5–6 on top of rejected tip `c113cfa`;
+round 5 fix `129723f`, round 6 fix in the commit carrying this update)
 
 ## Upstream authority
 
@@ -102,6 +103,26 @@ fabrication families. All three were reproduced at the tip via executable probe
 Governing rule preserved throughout: **when C# identity or scope is uncertain, emit nothing** —
 a missed edge is strictly preferred to a fabricated edge.
 
+## Round-6 findings (independent adversarial review of the round-5 state)
+
+The round-6 review (Codex GPT-5.6 Sol xhigh, Overstory lane `r5-mirror-review`; artifact
+`ROUND5-REVIEW.md`) confirmed B1/B2/B3 closed, source/dist parity, and doc counts, then returned
+**REJECT** on two new fabrication families — rows emitted from compilation units the C# compiler
+rejects (verified by the reviewer against .NET SDK 10.0.301):
+
+| Finding | Illegal shape | Compiler error | Fix |
+|---|---|---|---|
+| N1 | class/type declared before a file-scoped `namespace X;` | CS8956 | whole file emits nothing |
+| N2 | file-scoped + block namespaces mixed in one file (either order) | CS8955 | whole file emits nothing |
+| (adjacent) | two file-scoped declarations | CS8954 | whole file emits nothing |
+
+Fixed TDD-first: 6 regression tests added (5 red before the fix — N1 across all four emission
+kinds, N1 struct-variant, N2 both orders, CS8954, plus an `#if false` control proving the layout
+check runs on preprocessor-blanked text). After the fix: targeted suite **234/234** (unity 166 +
+unity-assets 36 + blender 32), blocker probe zero fabrications, the reviewer's own 23-fixture
+probe suite reruns with `unexpected=0`, and the 923-file real-project scan is unchanged (zero
+rows lost — no legal real file trips the layout check).
+
 ## Executable evidence (exact counts)
 
 All runs on Windows (this machine), Node from repo toolchain, at commit `129723f` in the resolver
@@ -113,11 +134,12 @@ worktree, 2026-07-16.
 npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts __tests__/blender.test.ts
 ```
 
-- `__tests__/unity.test.ts` — **160 passed** (142 prior + 18 new round-5 regression tests;
-  the 18 covered B1×4, B2×5, B3×9; 12 were red at tip `c113cfa`, 6 were controls already green)
+- `__tests__/unity.test.ts` — **166 passed** (142 prior + 18 round-5 regression tests covering
+  B1×4, B2×5, B3×9 (12 red at tip `c113cfa`) + 6 round-6 tests covering N1/N2/CS8954 (5 red
+  before the round-6 fix))
 - `__tests__/unity-assets.test.ts` — **36 passed**
 - `__tests__/blender.test.ts` — **32 passed**
-- Total targeted: **228/228 passed, 0 failed**
+- Total targeted: **234/234 passed, 0 failed**
 
 ### Build + dist parity probe
 
@@ -129,6 +151,8 @@ expected host/Command rows. Source-tip and dist behavior match.
 ### Full suite with pre-change baselining
 
 `npm test` at `129723f`: **1931 passed | 11–12 failed | 33 skipped (2354 tests, 127 files)**.
+After the round-6 fix: **1938 passed | 10 failed | 33 skipped (2360 tests)** — the same
+pre-existing failure families, zero new.
 
 Every failure was re-run at the pre-change baseline (round-5 diff stashed) and reproduced there:
 
