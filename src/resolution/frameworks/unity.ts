@@ -13,7 +13,6 @@ import {
   ResolvedRef,
   UnresolvedRef,
 } from '../types';
-import { stripCommentsForRegex } from '../strip-comments';
 import invocationTable from './unity-invocation-table.json';
 
 interface HostBaseRule {
@@ -395,18 +394,26 @@ function normalizeAttributeName(name: string): string {
 function parseAttributes(text: string): AttributeUse[] {
   const attrs: AttributeUse[] = [];
   const attrRegex = /\[([^\]]+)\]/g;
+  // Shared identifier grammar (round 8): `[@CommandAttribute]` and Cf-carrying spellings name the
+  // SAME attribute as the plain spelling under C# identity, so the name is canonicalized
+  // per-segment before any comparison against rule names or the KILL set.
+  const targetRe = new RegExp(`^(${CS_ID})\\s*:\\s*(.+)$`, 'u');
+  const nameRe = new RegExp(`^(${CS_QID})`, 'u');
   let match: RegExpExecArray | null;
   while ((match = attrRegex.exec(text)) !== null) {
     let body = match[1]!.trim();
     let target: string | null = null;
-    const targetMatch = /^([A-Za-z_]\w*)\s*:\s*(.+)$/.exec(body);
+    const targetMatch = targetRe.exec(body);
     if (targetMatch) {
-      target = targetMatch[1]!;
+      target = canonicalIdName(targetMatch[1]!);
       body = targetMatch[2]!.trim();
     }
-    const nameMatch = /^([A-Za-z_][\w.]*)/.exec(body);
+    const nameMatch = nameRe.exec(body);
     if (!nameMatch) continue;
-    const rawName = nameMatch[1]!;
+    const rawName = nameMatch[1]!
+      .split('.')
+      .map((segment) => canonicalIdName(segment.trim()))
+      .join('.');
     const parenIndex = body.indexOf('(');
     const args = parenIndex === -1 ? '' : body.slice(parenIndex + 1, body.lastIndexOf(')'));
     attrs.push({ rawName, name: normalizeAttributeName(rawName), args, target });
@@ -418,6 +425,279 @@ function leadingAttributes(content: string, index: number): AttributeUse[] {
   const prefix = content.slice(Math.max(0, index - 1000), index);
   const match = /((?:\[[^\]]+\][ \t]*(?:\r?\n[ \t]*)?)+)[ \t]*$/.exec(prefix);
   return match ? parseAttributes(match[1]!) : [];
+}
+
+// A C# 11 raw string (`"""…"""`), an interpolation hole carrying a nested quoted string, or a
+// longer quote fence desynchronizes a character-at-a-time quote scanner: string DATA leaks into
+// the parse text (a phantom `class X : NetworkBehaviour` inside a literal fabricates — GLM F1)
+// or code is consumed as string content (a legal file loses every row — R8-1/F2). This lexer
+// walks the file once knowing every C# lexical form — line/block comments, preprocessor
+// directive lines, char literals, regular / verbatim / interpolated / raw strings, and
+// interpolation holes with nested literals — and produces two offset-aligned views (newlines
+// kept so line numbers hold):
+//   `code` — string/char literals AND comments blanked; freeform directive tails (`#region …`,
+//            `#error …`, `#pragma …`) blanked past the keyword so their arbitrary text (quotes,
+//            apostrophes) can never desynchronize a later pass; conditional/define directives
+//            kept whole for the preprocessor pass.
+//   `text` — comments and freeform directive tails blanked, literals KEPT: the view for readers
+//            of string CONTENT (Invoke("X") linking, SyncVar hook names, ContextMenuItem).
+// Returns null when a literal is unterminated or a form is beyond sound lexing (an over-long
+// `{` run inside a raw interpolation, runaway nesting): such a file cannot be lexed with
+// certainty, so the caller emits nothing (round 9).
+function maskCSharpLiterals(content: string): { code: string; text: string } | null {
+  const chars = content.split('');
+  const textChars = content.split('');
+  const n = chars.length;
+  const blank = (from: number, to: number): void => {
+    for (let k = from; k < to; k++) {
+      if (chars[k] !== '\n' && chars[k] !== '\r') chars[k] = ' ';
+    }
+  };
+  const blankBoth = (from: number, to: number): void => {
+    for (let k = from; k < to; k++) {
+      if (chars[k] !== '\n' && chars[k] !== '\r') {
+        chars[k] = ' ';
+        textChars[k] = ' ';
+      }
+    }
+  };
+  const runLength = (index: number, ch: string): number => {
+    let k = index;
+    while (k < n && chars[k] === ch) k++;
+    return k - index;
+  };
+  const skipLine = (index: number): number => {
+    let k = index;
+    while (k < n && chars[k] !== '\n' && chars[k] !== '\r') k++;
+    return k;
+  };
+  const atLineStart = (index: number): boolean => {
+    for (let k = index - 1; k >= 0; k--) {
+      const c = chars[k];
+      if (c === '\n' || c === '\r') return true;
+      if (c !== ' ' && c !== '\t') return false;
+    }
+    return true;
+  };
+
+  // Char literal starting at `'`. Returns the index past the closing quote, or null.
+  const lexChar = (start: number): number | null => {
+    let k = start + 1;
+    while (k < n) {
+      const c = chars[k];
+      if (c === '\n' || c === '\r') return null; // char literals cannot span lines
+      if (c === '\\') {
+        k += 2;
+        continue;
+      }
+      if (c === "'") {
+        blank(start, k + 1);
+        return k + 1;
+      }
+      k++;
+    }
+    return null;
+  };
+
+  // Interpolation hole: expression code until `dollars` closing braces at brace depth 0.
+  // Nested literals (including nested raw strings) are lexed recursively. Returns the index
+  // past the hole's closing braces, or null.
+  const lexHole = (start: number, dollars: number, nesting: number): number | null => {
+    if (nesting > 16) return null;
+    let k = start;
+    let depth = 0;
+    while (k < n) {
+      const c = chars[k];
+      if (c === '/' && chars[k + 1] === '/') {
+        k = skipLine(k);
+        continue;
+      }
+      if (c === '/' && chars[k + 1] === '*') {
+        const close = content.indexOf('*/', k + 2);
+        if (close === -1) return null;
+        k = close + 2;
+        continue;
+      }
+      if (c === "'") {
+        const end = lexChar(k);
+        if (end === null) return null;
+        k = end;
+        continue;
+      }
+      if (c === '"' || c === '$' || c === '@') {
+        const end = lexString(k, nesting + 1);
+        if (end === null) return null;
+        if (end !== undefined) {
+          k = end;
+          continue;
+        }
+        k++;
+        continue;
+      }
+      if (c === '{') {
+        depth++;
+        k++;
+        continue;
+      }
+      if (c === '}') {
+        if (depth > 0) {
+          depth--;
+          k++;
+          continue;
+        }
+        const run = runLength(k, '}');
+        if (run >= dollars) return k + dollars;
+        return null; // a stray close brace short of the hole delimiter cannot compile
+      }
+      k++;
+    }
+    return null;
+  };
+
+  // String literal whose optional `$`/`@` prefix starts at `start`. Returns the index past the
+  // literal, undefined when `start` is not actually a string (e.g. an `@identifier`), or null
+  // when the literal cannot be lexed soundly.
+  const lexString = (start: number, nesting: number): number | null | undefined => {
+    if (nesting > 16) return null;
+    let k = start;
+    let dollars = 0;
+    let verbatim = false;
+    while (k < n && (chars[k] === '$' || chars[k] === '@')) {
+      if (chars[k] === '$') dollars++;
+      else verbatim = true;
+      k++;
+    }
+    if (k >= n || chars[k] !== '"') return undefined;
+    if (verbatim && dollars > 1) return null; // multiple $ is raw-only; @$$"…" cannot compile
+    const quotes = runLength(k, '"');
+    if (!verbatim && quotes >= 3) {
+      // Raw string literal: the opening run is the fence. Content may hold shorter quote runs;
+      // with a `$` prefix, holes open with exactly `dollars` braces (a longer brace run cannot
+      // compile in a raw form, so it is unsound to guess past one).
+      const fence = quotes;
+      let pos = k + fence;
+      while (pos < n) {
+        if (chars[pos] === '"') {
+          const run = runLength(pos, '"');
+          if (run >= fence) {
+            blank(start, pos + run);
+            return pos + run;
+          }
+          pos += run;
+          continue;
+        }
+        if (dollars > 0 && chars[pos] === '{') {
+          const run = runLength(pos, '{');
+          if (run > dollars) return null;
+          if (run === dollars) {
+            const end = lexHole(pos + dollars, dollars, nesting + 1);
+            if (end === null) return null;
+            pos = end;
+            continue;
+          }
+          pos += run;
+          continue;
+        }
+        pos++;
+      }
+      return null; // unterminated fence
+    }
+    if (dollars > 1) return null; // $$ without a raw fence cannot compile
+    if (quotes >= 2) {
+      // `""` — an empty literal (a verbatim `""` escape only exists INSIDE an open literal, so
+      // two quotes here always close immediately; any following quotes re-enter the main loop).
+      blank(start, k + 2);
+      return k + 2;
+    }
+    let pos = k + 1;
+    while (pos < n) {
+      const c = chars[pos];
+      if (c === '"') {
+        if (verbatim && chars[pos + 1] === '"') {
+          pos += 2;
+          continue;
+        }
+        blank(start, pos + 1);
+        return pos + 1;
+      }
+      if (!verbatim && c === '\\') {
+        pos += 2;
+        continue;
+      }
+      if (!verbatim && (c === '\n' || c === '\r')) return null; // cannot span lines
+      if (dollars === 1 && c === '{') {
+        if (chars[pos + 1] === '{') {
+          pos += 2;
+          continue;
+        }
+        const end = lexHole(pos + 1, 1, nesting + 1);
+        if (end === null) return null;
+        pos = end;
+        continue;
+      }
+      if (dollars === 1 && c === '}' && chars[pos + 1] === '}') {
+        pos += 2;
+        continue;
+      }
+      pos++;
+    }
+    return null; // unterminated
+  };
+
+  // Directives the preprocessor pass parses — kept whole. Everything else (`#region`,
+  // `#error`, `#pragma`, `#line`, `#nullable`, …) carries freeform text: blanked past the
+  // keyword in BOTH views so it can never desynchronize a later pass or feed a string reader.
+  const PP_KEEP = new Set(['if', 'elif', 'else', 'endif', 'define', 'undef']);
+
+  for (let i = 0; i < n; ) {
+    const c = chars[i];
+    if (c === '/' && chars[i + 1] === '/') {
+      const end = skipLine(i);
+      blankBoth(i, end);
+      i = end;
+      continue;
+    }
+    if (c === '/' && chars[i + 1] === '*') {
+      const close = content.indexOf('*/', i + 2);
+      if (close === -1) {
+        // Unterminated block comment: nothing after it is code.
+        blankBoth(i, n);
+        return { code: chars.join(''), text: textChars.join('') };
+      }
+      blankBoth(i, close + 2);
+      i = close + 2;
+      continue;
+    }
+    if (c === '#' && atLineStart(i)) {
+      let k = i + 1;
+      while (k < n && (chars[k] === ' ' || chars[k] === '\t')) k++;
+      const wordStart = k;
+      while (k < n && /[a-z]/.test(chars[k]!)) k++;
+      const keyword = chars.slice(wordStart, k).join('');
+      const end = skipLine(i);
+      if (!PP_KEEP.has(keyword)) blankBoth(k, end);
+      i = end;
+      continue;
+    }
+    if (c === "'") {
+      const end = lexChar(i);
+      if (end === null) return null;
+      i = end;
+      continue;
+    }
+    if (c === '"' || c === '$' || c === '@') {
+      const end = lexString(i, 0);
+      if (end === null) return null;
+      if (end !== undefined) {
+        i = end;
+        continue;
+      }
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return { code: chars.join(''), text: textChars.join('') };
 }
 
 function maskStringLiterals(content: string): string {
@@ -694,7 +974,14 @@ function resolveBaseFull(
   resolveAlias: (name: string, pos: number) => string | null,
   pos: number
 ): string {
-  let value = stripGenericSuffix(base.trim());
+  // Canonicalize each written segment BEFORE alias lookup (round 8): `@NetworkBehaviour` and a
+  // Cf-carrying spelling denote the same C# name as the plain form, at a base USE site exactly
+  // as at a declaration site. (`::`-qualified segments pass through untouched and simply fail
+  // the downstream host lookups — the conservative direction.)
+  let value = stripGenericSuffix(base.trim())
+    .split('.')
+    .map((segment) => canonicalIdName(segment.trim()))
+    .join('.');
   const dot = value.indexOf('.');
   if (dot !== -1) {
     const head = value.slice(0, dot);
@@ -771,7 +1058,13 @@ function makeAliasResolver(decls: AliasDecl[]): (name: string, pos: number) => s
     }
     if (targets.size !== 1) return null;
     const target = [...targets][0]!;
-    return /^[A-Za-z_][\w.]*$/.test(target) ? target : null;
+    // Round 8: the target follows the shared identifier grammar (`Mirror.@NetworkBehaviour` is
+    // Mirror.NetworkBehaviour), canonicalized per segment; a reserved-keyword segment can never
+    // compile, so such a target stays unresolved (the LHS still kills the bare fallback).
+    if (!new RegExp(`^${CS_QID}$`, 'u').test(target)) return null;
+    const segments = target.split('.');
+    if (segments.some((segment) => isReservedSpelling(segment))) return null;
+    return segments.map((segment) => canonicalIdName(segment)).join('.');
   };
 }
 
@@ -814,11 +1107,44 @@ const CS_ID_PART = '\\p{L}\\p{Nl}\\p{Nd}\\p{Pc}\\p{Mn}\\p{Mc}\\p{Cf}';
 const CS_ID = `@?[\\p{L}\\p{Nl}_][${CS_ID_PART}]*`;
 const CS_QID = `${CS_ID}(?:\\s*\\.\\s*${CS_ID})*`;
 
-// The verbatim prefix is spelling, not identity: `@X` and `X` are the SAME C# name. Every name
-// stored for comparison (class names, alias LHS, local-type shadows, namespace labels) must be
-// canonicalized or the escaped spelling slips past shadow/kill sets and fabricates.
+// The verbatim prefix is spelling, not identity: `@X` and `X` are the SAME C# name. Formatting
+// characters (Unicode Cf, e.g. U+200D) are likewise spelling only — ECMA-334 compares identifiers
+// after REMOVING them, so `Net‍workBehaviour` and `NetworkBehaviour` are ONE name (round 8).
+// Every name stored for comparison (class names, alias LHS/targets, base uses, attribute names,
+// local-type shadows, namespace labels) must be canonicalized or the exotic spelling slips past
+// shadow/kill sets and fabricates.
 function canonicalIdName(token: string): string {
-  return token.startsWith('@') ? token.slice(1) : token;
+  const bare = token.startsWith('@') ? token.slice(1) : token;
+  return bare.replace(/\p{Cf}/gu, '');
+}
+
+// C# reserved keywords (ECMA-334 §6.4.4). An UNESCAPED spelling that canonicalizes to one of
+// these can never be an identifier — a declaration using one cannot compile, so scanners treat it
+// as unparsable and suppress rather than guess (round 8: `namespace class;` emitted rows).
+// Contextual keywords (record, var, global, where, …) ARE legal identifiers and are not listed.
+const RESERVED_KEYWORDS = new Set([
+  'abstract', 'as', 'base', 'bool', 'break', 'byte', 'case', 'catch', 'char', 'checked', 'class',
+  'const', 'continue', 'decimal', 'default', 'delegate', 'do', 'double', 'else', 'enum', 'event',
+  'explicit', 'extern', 'false', 'finally', 'fixed', 'float', 'for', 'foreach', 'goto', 'if',
+  'implicit', 'in', 'int', 'interface', 'internal', 'is', 'lock', 'long', 'namespace', 'new',
+  'null', 'object', 'operator', 'out', 'override', 'params', 'private', 'protected', 'public',
+  'readonly', 'ref', 'return', 'sbyte', 'sealed', 'short', 'sizeof', 'stackalloc', 'static',
+  'string', 'struct', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'uint', 'ulong',
+  'unchecked', 'unsafe', 'ushort', 'using', 'virtual', 'void', 'volatile', 'while',
+]);
+
+// The reserved keywords that ARE legal as standalone type atoms in a using-directive target
+// (`using T = int?;`). Never legal as a qualifier segment (`int.Foo` is not a type).
+const TYPE_KEYWORDS = new Set([
+  'bool', 'byte', 'char', 'decimal', 'double', 'float', 'int', 'long', 'object', 'sbyte', 'short',
+  'string', 'uint', 'ulong', 'ushort', 'void',
+]);
+
+// A raw token spelled WITHOUT `@` whose canonical form is a reserved keyword — never a legal
+// identifier. Also fires on Cf-carrying spellings of a keyword: Roslyn keys keyword recognition
+// off the transformed spelling, and even if some build accepted it, suppressing stays safe.
+function isReservedSpelling(raw: string): boolean {
+  return !raw.startsWith('@') && RESERVED_KEYWORDS.has(canonicalIdName(raw));
 }
 
 // `[ ... ]` matcher for attribute lists (nesting from array creation inside attribute arguments).
@@ -862,10 +1188,13 @@ function scanNamespaceDecls(safe: string): NsDecl[] {
       continue;
     }
     const delim = match.index + 'namespace'.length + parsed[0].length - 1;
-    const name = parsed[1]!
-      .split('.')
-      .map((segment) => canonicalIdName(segment.trim()))
-      .join('.');
+    const rawSegments = parsed[1]!.split('.').map((segment) => segment.trim());
+    if (rawSegments.some((segment) => isReservedSpelling(segment))) {
+      // `namespace class;` — an unescaped reserved keyword is never an identifier (round 8).
+      decls.push({ start: match.index, kind: 'malformed', name: '', delim });
+      continue;
+    }
+    const name = rawSegments.map((segment) => canonicalIdName(segment)).join('.');
     decls.push({ start: match.index, kind: parsed[2] as '{' | ';', name, delim });
     keyword.lastIndex = delim + 1;
   }
@@ -892,6 +1221,160 @@ function namespaceSpans(safe: string): Array<{ name: string; start: number; end:
   return spans;
 }
 
+// Shape-level validator for a using-directive TARGET (C#12 alias-any-type): qualified names with
+// an optional `::` qualifier and balanced type-argument lists, tuples of two or more (optionally
+// named) elements, builtin type keywords, and `?`/`*`/`[…]` suffixes. This verifies TOKEN SHAPE,
+// not semantic type validity — but everything it cannot positively verify (an empty target, a
+// number, an operator soup, a function-pointer type) is REJECTED, and rejection only ever
+// suppresses (round 8 P7: `using T = ;` walked through the old `[^;]*` hole and fabricated).
+function isShapeValidType(input: string, allowTuple: boolean): boolean {
+  const s = input;
+  let i = 0;
+  const idRe = new RegExp(`^${CS_ID}`, 'u');
+  const ws = (): void => {
+    while (i < s.length && /\s/.test(s[i]!)) i++;
+  };
+  const ident = (): string | null => {
+    ws();
+    const m = idRe.exec(s.slice(i));
+    if (!m) return null;
+    i += m[0].length;
+    return m[0];
+  };
+  const typeArgs = (): boolean => {
+    i++; // consume '<'
+    for (;;) {
+      if (!parseType(true)) return false;
+      ws();
+      if (s[i] === ',') {
+        i++;
+        continue;
+      }
+      if (s[i] === '>') {
+        i++;
+        return true;
+      }
+      return false;
+    }
+  };
+  const qualifiedCore = (): boolean => {
+    let seg = ident();
+    if (seg === null) return false;
+    if (!seg.startsWith('@') && RESERVED_KEYWORDS.has(canonicalIdName(seg))) {
+      // A builtin type keyword is a complete core on its own (`int?`); any other reserved
+      // keyword — or a builtin used as a qualifier (`int.Foo`) — is not a type shape.
+      if (!TYPE_KEYWORDS.has(canonicalIdName(seg))) return false;
+      ws();
+      return s[i] !== '.' && s[i] !== '<' && s.slice(i, i + 2) !== '::';
+    }
+    ws();
+    if (s.slice(i, i + 2) === '::') {
+      i += 2;
+      seg = ident();
+      if (seg === null || isReservedSpelling(seg)) return false;
+      ws();
+    }
+    for (;;) {
+      if (s[i] === '<') {
+        if (!typeArgs()) return false;
+        ws();
+      }
+      if (s[i] === '.') {
+        i++;
+        seg = ident();
+        if (seg === null || isReservedSpelling(seg)) return false;
+        ws();
+        continue;
+      }
+      return true;
+    }
+  };
+  const parseType = (tupleOk: boolean): boolean => {
+    ws();
+    if (s[i] === '(') {
+      if (!tupleOk) return false;
+      i++;
+      let elements = 0;
+      for (;;) {
+        if (!parseType(true)) return false;
+        elements++;
+        ws();
+        const save = i;
+        const elementName = ident();
+        if (elementName !== null && isReservedSpelling(elementName)) return false;
+        if (elementName === null) i = save;
+        ws();
+        if (s[i] === ',') {
+          i++;
+          continue;
+        }
+        if (s[i] === ')') {
+          i++;
+          break;
+        }
+        return false;
+      }
+      if (elements < 2) return false; // a tuple type needs at least two elements
+    } else if (!qualifiedCore()) {
+      return false;
+    }
+    for (;;) {
+      ws();
+      if (s[i] === '?' || s[i] === '*') {
+        i++;
+        continue;
+      }
+      if (s[i] === '[') {
+        i++;
+        ws();
+        while (s[i] === ',') {
+          i++;
+          ws();
+        }
+        if (s[i] !== ']') return false;
+        i++;
+        continue;
+      }
+      return true;
+    }
+  };
+  if (!parseType(allowTuple)) return false;
+  ws();
+  return i === s.length;
+}
+
+// Shape-level validator for the ATTRIBUTES of a global attribute list (the text after the
+// `assembly:`/`module:` target): one or more comma-separated `Name` / `Name(args)` attributes
+// (C# permits a trailing comma). Names follow the shared identifier grammar; argument lists are
+// matched as a balanced opaque span (argument EXPRESSIONS are outside the scanner's scope). An
+// empty list cannot compile — `[assembly:]` fabricated through the old prefix-only check (P8).
+function isShapeValidAttributeList(body: string): boolean {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of body) {
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  if (parts.length > 1 && parts[parts.length - 1]!.trim() === '') parts.pop(); // trailing comma
+  const attrRe = new RegExp(`^\\s*(${CS_QID})\\s*(?:<[^<>]*>\\s*)?(?:\\([\\s\\S]*\\))?\\s*$`, 'u');
+  return (
+    parts.length > 0 &&
+    parts.every((part) => {
+      const m = attrRe.exec(part);
+      if (!m) return false;
+      return m[1]!.split('.').every((seg) => !isReservedSpelling(seg.trim()));
+    })
+  );
+}
+
 // Everything the compiler allows BEFORE a file-scoped namespace declaration: extern-alias
 // directives, using directives (`global using`, `using static`, using-aliases — including
 // C# 12 alias-any-type targets) and assembly/module attribute lists. ANY other leading construct
@@ -899,30 +1382,58 @@ function namespaceSpans(safe: string): Array<{ name: string; start: number; end:
 // STATEMENT, which is not a directive), anything unrecognized — makes the layout CS8956-illegal.
 // A whitelist, because the round-6 keyword blacklist could only reject spellings it could parse:
 // escaped/Unicode type names and top-level statements walked straight past it (round 7 I3/I4/I5).
+// Round 8 (P7/P8): each accepted form is verified to the TOKEN level — alias targets must parse
+// as a type shape, static imports as a type name, plain imports as a qualified name with no
+// reserved-keyword segment, attribute lists as a non-empty attribute sequence — because the old
+// `[^;]*`-style holes accepted degenerate directives the compiler rejects.
 function isLegalFileScopedPrelude(prelude: string): boolean {
-  const externAlias = new RegExp(`^extern\\s+alias\\s+${CS_ID}\\s*;`, 'u');
-  const usingDirective = new RegExp(
-    `^(?:global\\s+)?using\\s+(?:static\\s+)?(?:unsafe\\s+)?(?:${CS_ID}\\s*=\\s*[^;]*;|(?:${CS_ID}\\s*::\\s*)?${CS_QID}(?:<[^;]*>)?\\s*;)`,
-    'u'
-  );
+  const externAlias = new RegExp(`^extern\\s+alias\\s+(${CS_ID})\\s*;`, 'u');
+  const usingHead = /^(global\s+)?using\s+(static\s+)?(unsafe\s+)?/u;
+  const aliasForm = new RegExp(`^(${CS_ID})\\s*=\\s*([^;]*);`, 'u');
+  const importForm = new RegExp(`^((?:${CS_ID}\\s*::\\s*)?${CS_QID})\\s*;`, 'u');
   let rest = prelude;
   for (;;) {
     rest = rest.replace(/^\s+/u, '');
     if (rest === '') return true;
     const extern = externAlias.exec(rest);
     if (extern) {
+      if (isReservedSpelling(extern[1]!)) return false;
       rest = rest.slice(extern[0].length);
       continue;
     }
-    const using = usingDirective.exec(rest);
-    if (using) {
-      rest = rest.slice(using[0].length);
+    const head = usingHead.exec(rest);
+    if (head) {
+      const isStatic = head[2] !== undefined;
+      const isUnsafe = head[3] !== undefined;
+      const afterHead = rest.slice(head[0].length);
+      const alias = !isStatic && aliasForm.exec(afterHead);
+      if (alias) {
+        if (isReservedSpelling(alias[1]!)) return false;
+        if (!isShapeValidType(alias[2]!, true)) return false;
+        rest = afterHead.slice(alias[0].length);
+        continue;
+      }
+      if (isStatic) {
+        const semi = afterHead.indexOf(';');
+        if (semi === -1) return false;
+        if (!isShapeValidType(afterHead.slice(0, semi), false)) return false;
+        rest = afterHead.slice(semi + 1);
+        continue;
+      }
+      if (isUnsafe) return false; // `using unsafe` is only legal on alias/static forms
+      const imported = importForm.exec(afterHead);
+      if (!imported) return false;
+      if (imported[1]!.split(/::|\./u).some((seg) => isReservedSpelling(seg.trim()))) return false;
+      rest = afterHead.slice(imported[0].length);
       continue;
     }
     if (rest.startsWith('[')) {
       const close = findMatchingBracket(rest, 0);
       if (close === -1) return false;
-      if (!/^\s*(?:assembly|module)\s*:/u.test(rest.slice(1, close))) return false;
+      const inner = rest.slice(1, close);
+      const target = /^\s*(?:assembly|module)\s*:/u.exec(inner);
+      if (!target) return false;
+      if (!isShapeValidAttributeList(inner.slice(target[0].length))) return false;
       rest = rest.slice(close + 1);
       continue;
     }
@@ -1015,8 +1526,16 @@ function parseClassBlocks(
   content: string,
   filePath: string
 ): { classes: ClassBlock[]; openStacks: GatedStack[]; killedAttrNames: Set<string> } {
-  const noComments = stripCommentsForRegex(content, 'csharp');
-  const masked = maskStringLiterals(noComments);
+  // Literal lexing FIRST (round 9): raw strings, interpolation holes, char literals, comments,
+  // and freeform directive tails are blanked with full C# lexical knowledge, so no string data
+  // ever reaches the parse passes and no comment/directive text reaches the string readers. A
+  // null means a literal could not be lexed soundly — emit nothing for the whole file.
+  const lexed = maskCSharpLiterals(content);
+  if (lexed === null) {
+    return { classes: [], openStacks: [], killedAttrNames: new Set() };
+  }
+  const noComments = lexed.text;
+  const masked = maskStringLiterals(lexed.code);
   // Preprocessor pass (B3, round 5) AFTER comment-strip + string-mask (so `// #if false` and
   // `"#if false"` are non-evidence): provably-inactive regions and directive lines are blanked
   // from the parse text — an `#if false` block is not compiled, exactly like a comment.
@@ -1026,7 +1545,8 @@ function parseClassBlocks(
   if (illegalNamespaceLayout(safe)) {
     return { classes: [], openStacks: [], killedAttrNames: new Set() };
   }
-  // A `\uXXXX`/`\UXXXXXXXX` escape surviving comment-strip + string-mask + preprocessor-blank sits
+  // A `\uXXXX`/`\UXXXXXXXX` escape surviving the literal lexer (raw strings and interpolation
+  // holes included, round 9) + comment-strip + string-mask + preprocessor-blank sits
   // in CODE — a Unicode-escaped identifier (legal C#: an interface spelled with \u-escapes can
   // declare the NAME NetworkBehaviour). This scanner cannot decode escape equivalence, so every
   // name
@@ -1034,6 +1554,16 @@ function parseClassBlocks(
   // Emit nothing for the whole file instead (round 7, closed conservatively).
   if (/\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8}/.test(safe)) {
     return { classes: [], openStacks: [], killedAttrNames: new Set() };
+  }
+  // An unescaped reserved keyword can never be an identifier. A using-alias binding one
+  // (`using class = Mirror.NetworkBehaviour;`) cannot compile, and resolving a base through it
+  // would fabricate ownership from a compiler-rejected unit (round 8).
+  const aliasLhsRegex = new RegExp(`\\busing\\s+(${CS_ID})\\s*=`, 'gu');
+  let lhsMatch: RegExpExecArray | null;
+  while ((lhsMatch = aliasLhsRegex.exec(safe)) !== null) {
+    if (isReservedSpelling(lhsMatch[1]!)) {
+      return { classes: [], openStacks: [], killedAttrNames: new Set() };
+    }
   }
   const nsSpans = namespaceSpans(safe);
   const aliasDecls = parseAliasDecls(safe, nsSpans, pp.stateAt);
@@ -1045,6 +1575,10 @@ function parseClassBlocks(
   );
   let match: RegExpExecArray | null;
   while ((match = classRegex.exec(safe)) !== null) {
+    if (isReservedSpelling(match[1]!)) {
+      // `class class` cannot compile — the same reserved-keyword rule as namespace names (r8).
+      return { classes: [], openStacks: [], killedAttrNames: new Set() };
+    }
     const openBrace = safe.indexOf('{', match.index);
     if (openBrace === -1) continue;
     const closeBrace = findMatchingBrace(safe, openBrace);
@@ -2047,7 +2581,9 @@ function processClass(
 }
 
 function hasConcreteUnitySourceSignal(content: string): boolean {
-  const safe = maskStringLiterals(stripCommentsForRegex(content, 'csharp'));
+  const lexed = maskCSharpLiterals(content);
+  if (lexed === null) return false;
+  const safe = maskStringLiterals(lexed.code);
   if (/\bclass\s+[A-Za-z_]\w*\s*:\s*(?:UnityEngine\.)?(?:MonoBehaviour|ScriptableObject|StateMachineBehaviour)\b/.test(safe)) return true;
   if (/\bclass\s+[A-Za-z_]\w*\s*:\s*(?:UnityEditor\.)?(?:Editor|EditorWindow|PropertyDrawer|DecoratorDrawer|AssetPostprocessor|AssetModificationProcessor)\b/.test(safe)) return true;
   if (/\[(?:UnityEngine\.|UnityEditor\.)?(?:SerializeField|SerializeReference|RuntimeInitializeOnLoadMethod|InitializeOnLoadMethod|MenuItem|ContextMenu|CreateAssetMenu|AddComponentMenu|RequireComponent|CustomEditor|CustomPropertyDrawer|DrawGizmo)(?:Attribute)?\b/.test(safe)) return true;

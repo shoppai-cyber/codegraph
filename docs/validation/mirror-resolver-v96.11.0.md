@@ -153,6 +153,53 @@ fix: targeted suite **248/248**, blocker probe zero fabrications, prior 23-fixtu
 (A1 emits `namespace.OnStartServer` / `namespace.Cmd`), and the Mirror-source scan shows the
 identical result (zero rows lost — no legal real file trips the whitelist or the escape guard).
 
+## Round-8 findings (parallel adversarial panel of the round-7 state, commit `dfea637`)
+
+Round 8 ran as a three-reviewer parallel panel — independent Codex sol-xhigh (Overstory lane
+`r8-mirror-review-codex`, dotnet compiler receipts), GLM (`r8-mirror-review-glm`), and Opus
+(Agent-Teams `r8-mirror-review-opus`) — each probing to exhaustion instead of stopping at the
+first REJECT. All three confirmed every prior suite stayed closed (blocker probe, 23-fixture,
+25-fixture, targeted counts, source/dist parity) and all three returned **REJECT**. Artifacts:
+`scratch/round8-review/{codex,glm,opus}/` (fork-local, gitignored).
+
+| Finding | Reviewer | Shape | Direction |
+|---|---|---|---|
+| ID10 | Codex | U+200D (Cf) in `interface Net‍workBehaviour` — ECMA-334 §6.4.3 removes Cf for identity; scanner compared verbatim, shadow missed | fabrication |
+| ID11 | Codex | `namespace class;` — reserved keyword accepted as namespace name (CS-rejected) | fabrication |
+| ID13 | Codex | `: @NetworkBehaviour` base clause (base scanner was ASCII-only) | false suppression |
+| ID14 | Codex | `using NB = Mirror.@NetworkBehaviour;` alias target | false suppression |
+| ID15 | Codex | `[@CommandAttribute]` attribute spelling | row lost |
+| P7 | Codex | `using T = ;` empty alias target passed the prelude whitelist (CS-rejected) | fabrication |
+| P8 | Codex | `[assembly:]` empty attribute list passed the whitelist (CS-rejected) | fabrication |
+| R8-1 | Opus | `\u` sequence as DATA inside a C# 11 raw string (`"""…"""` JSON/regex) tripped the escape guard — the masker had no raw-string awareness | false suppression (whole legal file) + falsified doc claim |
+| F1 | GLM | one internal `"` (legal raw-string content) desynced the masker; `class Decoy : NetworkBehaviour` inside the literal emitted rows | **fabrication** |
+| F2a/F2b | GLM | same desync consumed real code as string content (with or without `\u`) | false suppression |
+
+Fixed TDD-first as five classes (32 regression tests added; 12 + 8 red at `dfea637`):
+Cf-stripping canonicalization; a 77-keyword `RESERVED_KEYWORDS` check at every
+identifier-required position; `CS_ID`/`CS_QID` + canonicalization extended to base clauses,
+alias targets, and attribute names; token-level prelude shape validators (`isShapeValidType`,
+`isShapeValidAttributeList`); and `maskCSharpLiterals` — a single-pass C# literal lexer (line/
+block comments, directive lines, char literals, regular/verbatim/interpolated/raw strings,
+`$$"""` fences, interpolation holes with recursively-lexed nested literals) producing
+offset-aligned `code` (literals/comments/freeform-directive tails blanked) and `text` (literals
+kept, for string-content readers) views; an unterminated or unsoundly-lexable literal suppresses
+the whole file. After the fix all three reviewers' own probe suites rerun clean: Codex 37
+fixtures `unexpected=0 parityMismatches=0`; Opus 34-fixture main suite `fabrications=0
+falseSuppressions=0 parityMismatches=0` plus all raw-string suites (realraw 5/5 EMIT, isolate
+3/3 EMIT, rawedge 7/7 EMIT, rawfab 0 fabrications, rawstring 5/5); GLM's F1/F2 shapes are pinned
+by the new regression tests. Opus's advisory C1 (`: @NetworkBehaviour` missed edge) now emits
+via the ID13 fix.
+
+**Fabrication boundary (adopted this round; review judges a satisfiable standard).** An emission
+is *fabricated* when the scanner's IDENTITY or SCOPE reasoning is unsound for the emitted row —
+name identity (escapes, Cf, keywords), declaration scope (namespaces, aliases, shadows, kills),
+file-scoped-namespace layout legality, and literal/comment/directive lexing are in scope; any
+error there suppresses. Expression-level compile errors (attribute argument expressions, method
+bodies, interpolation-hole contents) are outside scanner scope: a regex scanner cannot verify
+whole-file compilability, and rows from such files are not fabrications provided the
+identity/scope reasoning for the row itself is sound.
+
 ## Executable evidence (exact counts)
 
 All runs on Windows (this machine), Node from repo toolchain, in the resolver worktree,
@@ -165,12 +212,13 @@ their sections).
 npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts __tests__/blender.test.ts
 ```
 
-- `__tests__/unity.test.ts` — **180 passed** (142 prior + 18 round-5 regression tests covering
+- `__tests__/unity.test.ts` — **212 passed** (142 prior + 18 round-5 regression tests covering
   B1×4, B2×5, B3×9 (12 red at tip `c113cfa`) + 6 round-6 tests covering N1/N2/CS8954 (5 red
-  before the round-6 fix) + 14 round-7 identifier-grammar tests (12 red before the round-7 fix))
+  before the round-6 fix) + 14 round-7 identifier-grammar tests (12 red before the round-7 fix)
+  + 32 round-8/9 tests across the panel's defect classes (12 + 8 red at `dfea637`))
 - `__tests__/unity-assets.test.ts` — **36 passed**
 - `__tests__/blender.test.ts` — **32 passed**
-- Total targeted: **248/248 passed, 0 failed**
+- Total targeted: **280/280 passed, 0 failed**
 
 ### Build + dist parity probe
 
@@ -185,7 +233,11 @@ expected host/Command rows. Source-tip and dist behavior match.
 After the round-6 fix: **1938 passed | 10 failed | 33 skipped (2360 tests)** — the same
 pre-existing failure families, zero new. After the round-7 fix: **1947 passed | 9 failed |
 33 skipped (2374 tests)** — again only the pre-existing families (JVM/Kotlin ×3,
-mcp-initialize ×3, mcp-roots ×3; the flaky daemon-lifecycle test passed this run).
+mcp-initialize ×3, mcp-roots ×3; the flaky daemon-lifecycle test passed this run). After the
+round-9 fix: **1980 passed | 11 failed | 33 skipped (2406 tests)** — the same 9 pre-existing
+families plus 2 flaky `mcp-daemon` lifecycle tests that reproduce identically on unmodified
+`main` under machine load (both daemon suites pass 9/9 in isolation in the worktree AND on
+`main`; the flakes vary test-to-test run-to-run and are environmental, not branch-caused).
 
 Every failure was re-run at the pre-change baseline (round-5 diff stashed) and reproduced there:
 
@@ -226,6 +278,13 @@ Re-run after the round-7 fix (invoked from the acquisition root one level above 
 one extra scanned file): **924 scanned, 314 with rows, new 1709 vs baseline 1705 (+4)**, the same
 two pure-gain files, zero rows lost anywhere — the legal-prelude whitelist, the name-agnostic
 namespace scanner and the Unicode-escape guard suppress **no** legal real Mirror file.
+
+Re-run after the round-9 fix (reserved-keyword checks, prelude shape validators, and the C#
+literal lexer all active): **identical result — 924 scanned, 314 with rows, 1709 vs 1705 (+4),
+the same two pure-gain files, zero rows lost anywhere.** Caveat recorded by the round-8 panel:
+this corpus contains **zero raw string literals** (GLM verified by grep), so it cannot exercise
+the raw-string surface; that surface is pinned instead by the 18 raw-string/lexer regression
+tests and the three reviewers' probe suites rerun clean.
 
 ## Conservative omissions (deliberate missed edges, unchanged)
 

@@ -2921,6 +2921,519 @@ namespace Live
       expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
     });
 
+    // --- Round 8 (parallel adversarial panel): Cf identity, reserved keywords, remaining ASCII
+    // scanners (bases / alias targets / attribute names), prelude shape verification ---
+
+    it('suppresses when a format-character spelling locally shadows NetworkBehaviour (round 8)', () => {
+      // U+200D ZERO WIDTH JOINER sits between "Network" and "Behaviour". C# removes formatting
+      // characters (Cf) for identifier identity, so the local interface declares the NAME
+      // NetworkBehaviour and Player's bare base binds to it (the file compiles only because the
+      // second base is an interface). Emitting a Mirror host here fabricates.
+      const result = extract(`
+using Mirror;
+namespace Legal.FormatCharacter
+{
+    public interface Network‍Behaviour { }
+    public class LocalBase { }
+    public class Player : LocalBase, NetworkBehaviour
+    {
+        public void OnStartServer() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a bare base bound by a format-character alias spelling (round 8)', () => {
+      // `using Net<ZWJ>workBehaviour = …` binds the NAME NetworkBehaviour under C# identity, so
+      // the bare base resolves to the alias target, not Mirror.
+      const result = extract(`
+using Mirror;
+using Net‍workBehaviour = Foreign.Net;
+
+class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('canonicalizes format characters in a host base spelling (round 8 control)', () => {
+      // The base spelled with a ZWJ IS Mirror.NetworkBehaviour under C# identity — emit.
+      const result = extract(`
+using Mirror;
+namespace Legal.FormatCharacterBase;
+public class Player : Network‍Behaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('suppresses a namespace named with an unescaped reserved keyword (round 8)', () => {
+      // `namespace class;` cannot compile (CS1001) — an unescaped reserved keyword is never an
+      // identifier, so the declaration is unparsable and the unit is suppressed.
+      const result = extract(`
+using Mirror;
+namespace class;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a class named with an unescaped reserved keyword (round 8)', () => {
+      const result = extract(`
+using Mirror;
+namespace Broken.KeywordClass;
+public class class : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a using-alias whose LHS is an unescaped reserved keyword (round 8)', () => {
+      // `using class = Mirror.NetworkBehaviour;` cannot compile; resolving Player's base through
+      // it would emit a Mirror host from a compiler-rejected unit.
+      const result = extract(`
+using Mirror;
+using class = Mirror.NetworkBehaviour;
+namespace Broken.KeywordAlias;
+public class Player : class
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('keeps rows for @-escaped reserved-keyword identifiers (round 8 control)', () => {
+      // `namespace @class;` and `class @struct` are legal — @ turns any keyword into an identifier.
+      const result = extract(`
+using Mirror;
+namespace @class;
+public class @struct : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer struct.OnStartServer',
+        'UNITY attribute Command struct.Cmd',
+      ]);
+    });
+
+    it('resolves an @-escaped direct base to the Mirror host (round 8)', () => {
+      // `class Player : @NetworkBehaviour` — the verbatim prefix is spelling, not identity; the
+      // base IS Mirror.NetworkBehaviour and the rows must not be lost.
+      const result = extract(`
+using Mirror;
+namespace Legal.EscapedBase;
+public class Player : @NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.Cmd',
+      ]);
+    });
+
+    it('resolves a using-alias whose target carries an @-escaped segment (round 8)', () => {
+      const result = extract(`
+using Mirror;
+using NB = Mirror.@NetworkBehaviour;
+namespace Legal.EscapedAliasTarget;
+public class Player : NB
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.Cmd',
+      ]);
+    });
+
+    it('recognizes an @-escaped attribute name (round 8)', () => {
+      const result = extract(`
+using Mirror;
+namespace Legal.EscapedAttribute;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [@CommandAttribute] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.Cmd',
+      ]);
+    });
+
+    it('suppresses an empty using-alias target before a file-scoped namespace (round 8)', () => {
+      // `using T = ;` is not a directive the compiler accepts (CS1031); a prelude containing it
+      // makes the file-scoped layout illegal, so nothing may be emitted.
+      const result = extract(`
+using Mirror;
+using T = ;
+namespace Invalid.EmptyAlias;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a non-type using-alias target before a file-scoped namespace (round 8)', () => {
+      // The whitelist verifies the target parses as a TYPE shape, not merely that text precedes
+      // the semicolon — `using T = 123;` cannot compile.
+      const result = extract(`
+using Mirror;
+using T = 123;
+namespace Invalid.NonTypeAlias;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses an empty assembly attribute list before a file-scoped namespace (round 8)', () => {
+      // `[assembly:]` has no attribute (CS1001) — the list must contain at least one.
+      const result = extract(`
+using Mirror;
+[assembly:]
+namespace Invalid.EmptyAssemblyAttribute;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('keeps the legal alias-any-type and attribute prelude forms (round 8 control)', () => {
+      // Every form here is compiler-legal before a file-scoped namespace: global using, a
+      // constructed-generic using static, tuple / pointer / nullable-value alias-any-type
+      // targets, and a multi-attribute assembly list with nested brackets and a trailing comma.
+      const result = extract(`
+global using Mirror;
+using static System.Collections.Generic.EqualityComparer<int>;
+using T = (int, string);
+using unsafe P = int*;
+using NV = int?;
+[assembly: Marker(new[] { 1 }), Other,]
+namespace Legal.Prelude8;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void Cmd() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.Cmd',
+      ]);
+    });
+
+    // --- Round 9 (R8-1, Opus panel): C# 11 raw string literals must be masked — a \uXXXX escape
+    // in raw-string DATA is not an identifier escape, and raw-string content must never leak
+    // into the parse text (in either direction) ---
+
+    it('emits for a legal file whose raw string holds a \\u escape in JSON data (R8-1 J1)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string cfg = """{ "label": "\\u0041" }""";
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('emits for a raw-string regex whose quotes flip the old masker parity (R8-1 J2)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string re = """["\\u00C0-\\u017F]+""";
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits when a multi-line raw string carries quotes and a \\u escape', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string doc = """
+        { "kind": "payload", "text": "\\u0041 and "quoted" runs" }
+        """;
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits when a longer quote fence encloses a """ run plus a \\u escape', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string fence = """"inner """ quotes \\u0041"""";
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits when an interpolated raw string carries a \\u escape', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string msg = $"""hello {name} \\u0041""";
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('never fabricates from phantom declarations inside a raw string', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string payload = """
+        namespace Injected;
+        class Ghost : NetworkBehaviour { [Command] void CmdBad() { } }
+        """;
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('never fabricates when an internal quote desyncs a naive masker (GLM F1)', () => {
+      // One internal " is legal raw-string content (1 < 3). The old masker consumed it as a
+      // string terminator, leaking the Decoy text into the parse stream as real code.
+      const result = extract(`
+using Mirror;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+    string decoy = """x"
+    class Decoy : NetworkBehaviour { public override void OnStartServer() { } }
+    """;
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('emits for a raw string with one internal quote and no escapes (GLM F2b)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+    string s = """a"b""";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('emits when an interpolation hole carries a nested quoted string', () => {
+      // $"{d["key"]}" is legal C# — quotes inside a hole must not desync the masker.
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+    string s = $"value: {d["key"]} end";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('never fabricates from phantom text after a holed interpolated string', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    string s = $"{d["k"]} class Ghost : NetworkBehaviour { } bad";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits for a $$-raw JSON template with literal braces and a hole', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    string json = $$"""{ "a": {{x}}, "b": "\\u0041" }""";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('never leaks a nested raw string inside an interpolation hole', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    string s = $"""outer {x ?? """class Ghost : NetworkBehaviour { }"""} tail""";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('emits for a verbatim interpolated string with holes and doubled quotes', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    string s = $@"say ""hi"" to {name}";
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('resolves an @-escaped base through an @-escaped alias (GLM advisory)', () => {
+      const result = extract(`
+using Mirror;
+using @NB = Mirror.NetworkBehaviour;
+namespace Game;
+public class Player : @NB
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+      ]);
+    });
+
+    it('does not open a raw-string fence from a """ inside a comment', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+// """ this is a comment, not a fence
+class Player : NetworkBehaviour {
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('keeps code after a raw string containing comment-lookalike text', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string s = """ // not a comment " } class X """;
+    public override void OnStartServer() { }
+    [Command] void CmdGo() { }
+}
+`);
+      expect(nodeNames(result)).toEqual([
+        'UNITY NetworkBehaviour.OnStartServer Player.OnStartServer',
+        'UNITY attribute Command Player.CmdGo',
+      ]);
+    });
+
+    it('still suppresses a \\u escape in an identifier even alongside a clean raw string', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Pl\\u0061yer : NetworkBehaviour {
+    string s = """clean""";
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('suppresses a file with an unterminated raw-string fence (cannot compile)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+class Player : NetworkBehaviour {
+    string s = """never closed;
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
     // --- SyncVar field liveness ---
 
     it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {

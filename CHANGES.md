@@ -349,17 +349,72 @@ suppression were demonstrated.
   (`interface N…` can declare the NAME NetworkBehaviour). Every name comparison in such a
   file is unsound, so the whole file emits nothing. Escapes inside strings, char literals,
   comments and inactive regions are already masked and never trigger the guard.
+  *(Round-8 review falsified the last sentence for C# 11 raw strings — the old masker had no
+  `"""` awareness, so raw-string data DID reach the guard. Closed in r9 by the literal lexer;
+  the sentence is true again as of r9.)*
+
+## r9 — identifier identity, reserved keywords, prelude shape, and a C# literal lexer (adversarial re-review round 8, parallel panel)
+
+Round 8 ran as a three-reviewer parallel panel on commit `dfea637` — independent Codex
+(sol-xhigh), GLM, and Opus reviewers, each instructed to probe to exhaustion rather than stop at
+the first REJECT. All three REJECTED, together demonstrating four independent defect classes
+(every one with an executable repro; Codex's carried dotnet compiler receipts):
+
+1. **Cf formatting characters broke identity** (Codex ID10). ECMA-334 §6.4.3 REMOVES Unicode
+   formatting characters (Cf, e.g. U+200D ZWJ) for identifier comparison; the scanner compared
+   them verbatim, so `interface Net‍workBehaviour` did not shadow `NetworkBehaviour` —
+   fabrication. `canonicalIdName` now strips `\p{Cf}` (combining marks Mn/Mc are retained —
+   C# does not NFC-normalize).
+2. **Reserved keywords accepted as identifiers** (Codex ID11, plus neighbors). `namespace
+   class;`, `class class`, `using class = …;` all emitted rows from compiler-rejected units. A
+   77-entry `RESERVED_KEYWORDS` set (contextual keywords like `record`/`var` excluded — those
+   CAN be identifiers) is now enforced at every identifier-required position the scanner
+   consumes: namespace segments, class names, alias LHS/RHS segments, import/extern segments,
+   attribute name segments.
+3. **Three scanners still spoke ASCII** (Codex ID13/ID14/ID15). Base clauses, alias targets, and
+   attribute names didn't know the shared grammar, so `: @NetworkBehaviour`, `using NB =
+   Mirror.@NetworkBehaviour;`, and `[@CommandAttribute]` were falsely suppressed/dropped. All
+   three now use `CS_ID`/`CS_QID` with per-segment canonicalization.
+4. **Prelude whitelist matched prefixes, not shapes** (Codex P7/P8). `using T = ;` and
+   `[assembly:]` cannot compile but passed the r8 whitelist and emitted. Two shape validators —
+   `isShapeValidType` (recursive-descent: qualified names, type args, tuples, pointer/nullable/
+   array suffixes, builtin-keyword atoms) and `isShapeValidAttributeList` (≥1 attribute,
+   balanced args, trailing comma) — now verify prelude directives to token level.
+5. **Raw string literals were not lexed** (Opus R8-1; GLM F1/F2 — the panel's headline). The old
+   character-at-a-time masker parsed `"""` as `""` + a new string, so one internal quote (legal
+   raw-string content) desynchronized it: string DATA leaked into the parse text (GLM's
+   fabricated `class Decoy : NetworkBehaviour` from inside a literal) or code was consumed as
+   string content (Opus's legal JSON/regex raw strings with `\u` sequences tripping the escape
+   guard — whole legal files suppressed). Replaced with `maskCSharpLiterals`, a single-pass C#
+   literal lexer that knows every lexical form — line/block comments, preprocessor directive
+   lines, char literals, regular/verbatim/interpolated/raw strings, `$$"""` fences, and
+   interpolation holes with recursively-lexed nested literals — and emits two offset-aligned
+   views: `code` (literals + comments + freeform directive tails blanked) for the parse passes,
+   `text` (literals kept) for string-content readers (Invoke linking, SyncVar hooks,
+   ContextMenuItem). An unterminated or unsoundly-lexable literal returns null → the whole file
+   emits nothing. This also closed a pre-existing desync: freeform directive text (`#region
+   don't`) could open a phantom char/string literal in the old pipeline.
+
+**Fabrication boundary (documented so review judges a satisfiable standard).** An emission is
+*fabricated* when the scanner's IDENTITY or SCOPE reasoning is unsound for the emitted row —
+name identity (escapes, Cf, keywords), declaration scope (namespaces, aliases, shadows, kills),
+file-scoped-namespace layout legality, and literal/comment/directive lexing are all in scope,
+and any error there suppresses. Expression-level compile errors (attribute argument expressions,
+method bodies, interpolation-hole contents) are OUTSIDE scanner scope: a regex scanner cannot
+verify whole-file compilability, and rows from such files are not fabrications provided the
+identity/scope reasoning for the row itself is sound.
 
 ## Verification
 
-- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **216 passed / 216**
-  (unity.test.ts 180, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
+- `npx vitest run __tests__/unity.test.ts __tests__/unity-assets.test.ts`: **248 passed / 248**
+  (unity.test.ts 212, unity-assets.test.ts 36). Round 4 added 11 Mirror-gated cases (one per BLOCKING
   and SHOULD-FIX) and rewrote two tests whose fixtures were invalid C# or documented the pre-fix bug:
   the same-named-struct case now asserts the poison (emit nothing), and the base-less-partial case now
   asserts the sibling block's members are live. Round 5 added 18 B1/B2/B3 regression cases (12 red at
   tip `c113cfa`); round 6 added 6 N1/N2 illegal-namespace-layout cases (5 red); round 7 added 14
-  identifier-grammar cases (12 red). (Round 1 was 97; round 2 → 114; round 3 → 131 for unity.test.ts;
-  round 4 → 142; round 5 → 160; round 6 → 166; round 7 → 180.)
+  identifier-grammar cases (12 red); round 8/9 added 32 cases across the panel's four defect classes
+  (12 + 8 red at `dfea637`, the rest controls). (Round 1 was 97; round 2 → 114; round 3 → 131 for
+  unity.test.ts; round 4 → 142; round 5 → 160; round 6 → 166; round 7 → 180; round 9 → 212.)
   `__tests__/blender.test.ts`: **32 passed / 32** (control, no regression).
 - `npx tsc --noEmit`: **exit 0**. `npm run build`: **exit 0**. Built-`dist/` probe: all B1/B2/B3
   fabrication cases emit nothing; all controls emit (source/dist parity).
