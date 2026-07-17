@@ -2229,6 +2229,334 @@ partial class P {
       );
     });
 
+    // --- Round 5 (graduation): B1/B2/B3 fabrication families ---
+    // B1: a `global::`/extern-qualified base ALIAS whose RHS the alias parser cannot expand must not
+    // fall back to its bare LHS token — C# binds the bare token to the alias, so classifying it as a
+    // framework base fabricates a Mirror host. Any alias LHS shadows the bare token for base
+    // classification, exactly like a local type redeclaration (kill, never resolve-through).
+
+    it('does not fabricate a Mirror host through a global::-qualified base alias (B1, round 5)', () => {
+      const result = extract(`
+using Mirror;
+using NetworkBehaviour = global::Foreign.Net.NetworkBehaviour;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+    [SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not fabricate a Mirror host through an extern-alias-qualified base alias (B1, round 5)', () => {
+      const result = extract(`
+extern alias Vendor;
+using Mirror;
+using NetworkBehaviour = Vendor::Foreign.Net.NetworkBehaviour;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('is order-independent: the foreign global:: base alias suppresses in either declaration order (B1, round 5)', () => {
+      const result = extract(`
+using NetworkBehaviour = global::Foreign.Net.NetworkBehaviour;
+using Mirror;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still resolves a supported file-scope alias of Mirror\'s own FQ base (B1 control, round 5)', () => {
+      const result = extract(`
+using Mirror;
+using NB = Mirror.NetworkBehaviour;
+
+public class Player : NB
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer', 'UNITY attribute Command Player.CmdFire'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdFire'].sort()
+      );
+    });
+
+    // B2: a using-alias declared inside one namespace is scoped to that namespace declaration in C#.
+    // Applying it file-wide fabricates ownership for classes in OTHER namespaces. Positive alias
+    // resolution is namespace-scope-aware; outside the scope the LHS name stays killed (suppression
+    // over guessed ownership).
+
+    it('does not apply an alias declared in namespace A to a class in namespace B (B2, round 5)', () => {
+      const result = extract(`
+using Mirror;
+
+namespace A
+{
+    using NB = Mirror.NetworkBehaviour;
+}
+
+namespace B
+{
+    public class Victim : NB
+    {
+        public override void OnStartServer() { }
+        [Command] void CmdFire() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not apply an alias declared in a block namespace to a top-level class after it (B2, round 5)', () => {
+      const result = extract(`
+using Mirror;
+namespace Inner { using NB = Mirror.NetworkBehaviour; }
+class Victim : NB
+{
+    public void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('prefers suppression when a namespace-scoped alias rebinds a gated token used bare elsewhere (B2, round 5)', () => {
+      // In C#, B.Victim's bare NetworkBehaviour binds to Mirror's via the file-level using — but our
+      // scope model cannot prove that without full namespace resolution, so the alias-bound name is
+      // killed file-wide for bare-base classification. Missed edge, never a guess.
+      const result = extract(`
+using Mirror;
+namespace A { using NetworkBehaviour = global::Foreign.Net.NetworkBehaviour; }
+namespace B
+{
+    class Victim : NetworkBehaviour
+    {
+        public void OnStartServer() { }
+        [Command] void CmdFire() { }
+    }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still resolves an alias for a class in the SAME block namespace (B2 control, round 5)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game
+{
+    using NB = Mirror.NetworkBehaviour;
+    public class Player : NB
+    {
+        public override void OnStartServer() { }
+        [Command] void CmdFire() { }
+    }
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer', 'UNITY attribute Command Player.CmdFire'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdFire'].sort()
+      );
+    });
+
+    it('still resolves an alias under a file-scoped namespace (B2 control, round 5)', () => {
+      const result = extract(`
+using Mirror;
+namespace Game;
+using NB = Mirror.NetworkBehaviour;
+public class Player : NB
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer', 'UNITY attribute Command Player.CmdFire'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdFire'].sort()
+      );
+    });
+
+    // B3: preprocessor text in a provably-inactive region (`#if false`) is NOT compiled — a
+    // `using Mirror;` there must not open the gate, and declarations there are not evidence of
+    // anything. Evidence (gate-opening) requires a provably-ACTIVE position; exclusion
+    // (disqualifying usings) fires from any potentially-active position. Uncertain regions
+    // (`#if UNKNOWN_SYMBOL`) provide no evidence but still exclude — emit-nothing under uncertainty.
+
+    it('does not open the Mirror gate from a using inside #if false (B3, round 5)', () => {
+      const result = extract(`
+#if false
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+    [SyncVar] int health;
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('does not open the Mirror gate from a using inside a nested inactive branch (B3, round 5)', () => {
+      const result = extract(`
+#if true
+#if false
+using Mirror;
+#endif
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('treats the #else of #if false as active — inactive FishNet must not disqualify, active Mirror opens (B3, round 5)', () => {
+      const result = extract(`
+#if false
+using FishNet.Object;
+#else
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+    [Command] void CmdFire() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        ['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer', 'UNITY attribute Command Player.CmdFire'].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        ['references:unity:host:Player.OnStartServer', 'references:unity:method:Player.CmdFire'].sort()
+      );
+    });
+
+    it('treats an #elif true after #if false as active (B3, round 5)', () => {
+      const result = extract(`
+#if false
+using FishNet.Object;
+#elif true
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('does not open the gate from a using under an UNKNOWN conditional symbol (B3, round 5)', () => {
+      // Whether UNITY_SERVER is defined is a build-configuration fact we cannot prove from the file:
+      // uncertain evidence opens nothing (missed edge over fabrication).
+      const result = extract(`
+#if UNITY_SERVER
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('still honors a disqualifying using under an UNKNOWN conditional symbol (B3, round 5)', () => {
+      // The FishNet using is only potentially active — but a potentially-competing stack is enough
+      // to close the Mirror gate (exclusion always wins; suppression is the safe direction).
+      const result = extract(`
+#if SOME_SYMBOL
+using FishNet.Object;
+#endif
+using Mirror;
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(result).toEqual({ nodes: [], references: [] });
+    });
+
+    it('opens the gate when an in-file #define proves the conditional using active (B3, round 5)', () => {
+      const result = extract(`
+#define MIRROR_ON
+#if MIRROR_ON
+using Mirror;
+#endif
+
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('ignores preprocessor text inside comments and strings (B3, round 5)', () => {
+      // The commented directive and the string literal are non-evidence in BOTH directions: they
+      // neither open an inactive region nor hide the genuinely active using.
+      const result = extract(`
+// #if false
+using Mirror;
+
+public class Player : NetworkBehaviour
+{
+    string s = "#if false";
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
+    it('does not let a local shadow declaration inside #if false suppress a real Mirror host (B3, round 5)', () => {
+      // The shadowing `class NetworkBehaviour {}` is provably not compiled, so C# binds the bare base
+      // to Mirror's type — blanking the inactive region restores the correct emission.
+      const result = extract(`
+using Mirror;
+#if false
+class NetworkBehaviour {}
+#endif
+public class Player : NetworkBehaviour
+{
+    public override void OnStartServer() { }
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY NetworkBehaviour.OnStartServer Player.OnStartServer']);
+      expect(refPairs(result)).toEqual(['references:unity:host:Player.OnStartServer']);
+    });
+
     // --- SyncVar field liveness ---
 
     it('keeps a non-static [SyncVar] field live under an open Mirror gate', () => {

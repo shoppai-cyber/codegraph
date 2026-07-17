@@ -273,16 +273,32 @@ interface HostInfo {
  *    local type, not the framework base, so emitting a host row would fabricate. A DOTTED owning FQ
  *    base (`Mirror.NetworkBehaviour`) is fully qualified and cannot be shadowed by a local simple
  *    name, so the shadow check applies to the bare branch only.
+ *  - A BARE token the file binds with ANY using-alias (`aliasBound`) is likewise suppressed (B1,
+ *    round 5): when the alias's target was expandable, resolveBaseFull already rewrote the token to
+ *    its dotted form before this function runs — so a bare survivor means the alias target was NOT
+ *    resolvable (`global::`/extern-`::`/generic RHS, ambiguous bindings, uncertain `#if` region, or
+ *    out-of-scope use). C# would bind the bare token to the alias, so classifying the fallback as a
+ *    framework base fabricates a host. Applies to the bare Tier-1 branch too — an alias-rebound
+ *    `MonoBehaviour` is the same fabrication one tier down.
  */
-function classifyHost(fullBase: string, openStacks: GatedStack[], shadowed: Set<string>): HostInfo | null {
+function classifyHost(
+  fullBase: string,
+  openStacks: GatedStack[],
+  shadowed: Set<string>,
+  aliasBound: Set<string>
+): HostInfo | null {
   const short = fullBase.split('.').pop() || fullBase;
-  if (HOST_BASES.has(short)) return { hostBase: short, applicable: [] };
+  const bare = !fullBase.includes('.');
+  if (HOST_BASES.has(short)) {
+    if (bare && aliasBound.has(short)) return null;
+    return { hostBase: short, applicable: [] };
+  }
   if (GATED_HOST_TOKENS.has(short)) {
-    if (fullBase.includes('.')) {
+    if (!bare) {
       const owners = openStacks.filter((s) => s.fqBaseAlternative === fullBase);
       return owners.length ? { hostBase: short, applicable: owners } : null;
     }
-    if (shadowed.has(short)) return null;
+    if (shadowed.has(short) || aliasBound.has(short)) return null;
     const applicable = openStacks.filter((s) => s.hostBases.has(short));
     return applicable.length ? { hostBase: short, applicable } : null;
   }
@@ -297,12 +313,24 @@ function classifyHost(fullBase: string, openStacks: GatedStack[], shadowed: Set<
  *    elsewhere (e.g. a field/parameter type) never opens the gate.
  * Read from comment-stripped, string-masked source.
  */
-function openStacksFor(safe: string, classes: ClassBlock[]): GatedStack[] {
+function openStacksFor(
+  safe: string,
+  evidence: string,
+  classes: ClassBlock[],
+  stateAt: (index: number) => PpState
+): GatedStack[] {
+  // Preprocessor asymmetry (B3, round 5): EXCLUSION reads the parse text (`safe` — provably-active
+  // + uncertain regions; a potentially-compiled competitor closes the gate, suppression is safe),
+  // while EVIDENCE reads the evidence text (provably-active only; an uncertain `using Mirror;`
+  // proves nothing, and provably-inactive text was blanked from both). FQ-base evidence likewise
+  // requires the class declaration itself to sit in provably-active text.
   return GATED_STACKS.filter((stack) => {
     if (stack.disqualifyUsingRes.some((re) => re.test(safe))) return false;
-    if (stack.requiredUsingRes.some((re) => re.test(safe))) return true;
+    if (stack.requiredUsingRes.some((re) => re.test(evidence))) return true;
     if (stack.fqBaseAlternative) {
-      return classes.some((cls) => cls.fullBases.includes(stack.fqBaseAlternative!));
+      return classes.some(
+        (cls) => cls.fullBases.includes(stack.fqBaseAlternative!) && stateAt(cls.declIndex) === 'active'
+      );
     }
     return false;
   });
@@ -424,6 +452,182 @@ function maskStringLiterals(content: string): string {
   return chars.join('');
 }
 
+// --- C# preprocessor awareness (B3, round 5) ---------------------------------------------------
+// Text in a provably-INACTIVE region (`#if false`) is not compiled: a `using Mirror;` there must
+// not open the gate and declarations there are not evidence of anything, so those regions are
+// BLANKED from the parse text exactly like comments. Regions whose condition we cannot decide
+// from the file (`#if SOME_BUILD_SYMBOL`) are UNKNOWN: their text stays in the parse text (the
+// code may well be compiled) and still fires EXCLUSIONS (a potentially-active competitor using
+// closes a gate — suppression is safe), but it never provides gate-opening EVIDENCE (uncertain
+// evidence fabricates; emit nothing instead). Only provably-ACTIVE text is evidence.
+//
+// The condition evaluator is deliberately tiny and provability-oriented: `true`/`false` literals,
+// `!expr`, balanced outer parentheses, and single symbols tracked through in-file `#define`/
+// `#undef` (an in-file directive overrides the build configuration, so it IS provable; a symbol
+// never (un)defined in-file is UNKNOWN). Anything else — `&&`, `||`, comparisons — is UNKNOWN.
+// Directive lines themselves are always blanked. Must run on comment-stripped, string-masked
+// text so `// #if false` and `"#if false"` are non-evidence in both directions.
+
+type PpState = 'active' | 'unknown' | 'inactive';
+type PpTri = 'true' | 'false' | 'unknown';
+
+interface PreprocessorAnalysis {
+  /** Parse text: provably-inactive regions and directive lines blanked (offsets preserved). */
+  text: string;
+  /** Evidence text: only provably-active text survives (unknown regions also blanked). */
+  evidence: string;
+  /** Region state at a source offset. */
+  stateAt(index: number): PpState;
+}
+
+function analyzePreprocessor(masked: string): PreprocessorAnalysis {
+  const lines = masked.split('\n');
+  const defined = new Set<string>();
+  const undefd = new Set<string>();
+  const tainted = new Set<string>();
+
+  const evalExpr = (raw: string): PpTri => {
+    let e = raw.trim();
+    // Strip balanced OUTER parentheses only (`(true)` → `true`; `(A) && (B)` is left alone).
+    for (;;) {
+      if (!e.startsWith('(') || !e.endsWith(')')) break;
+      let depth = 0;
+      let wraps = true;
+      for (let i = 0; i < e.length; i++) {
+        if (e[i] === '(') depth++;
+        else if (e[i] === ')') {
+          depth--;
+          if (depth === 0 && i !== e.length - 1) {
+            wraps = false;
+            break;
+          }
+        }
+      }
+      if (!wraps || depth !== 0) break;
+      e = e.slice(1, -1).trim();
+    }
+    if (e === 'true') return 'true';
+    if (e === 'false') return 'false';
+    if (e.startsWith('!')) {
+      const inner = evalExpr(e.slice(1));
+      return inner === 'true' ? 'false' : inner === 'false' ? 'true' : 'unknown';
+    }
+    if (/^[A-Za-z_]\w*$/.test(e)) {
+      if (tainted.has(e)) return 'unknown';
+      if (defined.has(e)) return 'true';
+      if (undefd.has(e)) return 'false';
+      return 'unknown';
+    }
+    return 'unknown';
+  };
+
+  interface Frame {
+    parent: PpState;
+    state: PpState;
+    seenTrue: boolean; // an earlier branch of this #if was provably taken → later branches dead
+    seenUnknown: boolean; // an earlier branch MIGHT have been taken → later branches undecidable
+  }
+  const stack: Frame[] = [];
+  const cur = (): PpState => (stack.length ? stack[stack.length - 1]!.state : 'active');
+  // A branch's state combines its parent's state with its own condition; inactive dominates.
+  const combine = (parent: PpState, cond: PpTri): PpState => {
+    if (parent === 'inactive' || cond === 'false') return 'inactive';
+    if (cond === 'unknown') return 'unknown';
+    return parent;
+  };
+
+  // Per line: 'directive' lines are blanked everywhere; other lines carry their region state.
+  const lineKinds: Array<PpState | 'directive'> = [];
+  for (const rawLine of lines) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+    const m = /^\s*#\s*([A-Za-z]\w*)(.*)$/.exec(line);
+    if (!m) {
+      lineKinds.push(cur());
+      continue;
+    }
+    const kw = m[1]!;
+    const rest = m[2] ?? '';
+    if (kw === 'if') {
+      const parent = cur();
+      const cond = evalExpr(rest);
+      stack.push({
+        parent,
+        state: combine(parent, cond),
+        seenTrue: cond === 'true',
+        seenUnknown: cond === 'unknown',
+      });
+    } else if (kw === 'elif') {
+      const f = stack[stack.length - 1];
+      if (f) {
+        const cond = evalExpr(rest);
+        if (f.seenTrue || cond === 'false') f.state = 'inactive';
+        else if (cond === 'true' && !f.seenUnknown) f.state = f.parent;
+        else f.state = f.parent === 'inactive' ? 'inactive' : 'unknown';
+        if (cond === 'true') f.seenTrue = true;
+        if (cond === 'unknown') f.seenUnknown = true;
+      }
+    } else if (kw === 'else') {
+      const f = stack[stack.length - 1];
+      if (f) {
+        if (f.seenTrue) f.state = 'inactive';
+        else if (f.seenUnknown) f.state = f.parent === 'inactive' ? 'inactive' : 'unknown';
+        else f.state = f.parent; // every earlier branch provably false → the #else is taken
+      }
+    } else if (kw === 'endif') {
+      stack.pop();
+    } else if (kw === 'define' || kw === 'undef') {
+      const sym = /^\s*([A-Za-z_]\w*)/.exec(rest)?.[1];
+      if (sym) {
+        const state = cur();
+        if (state === 'active') {
+          if (kw === 'define') {
+            defined.add(sym);
+            undefd.delete(sym);
+          } else {
+            undefd.add(sym);
+            defined.delete(sym);
+          }
+        } else if (state === 'unknown') {
+          // A conditionally-compiled (re)definition makes the symbol undecidable for the rest
+          // of the file — never let a maybe-#define prove a later region active.
+          tainted.add(sym);
+        }
+      }
+    }
+    // #region/#endregion/#pragma/#nullable/#line/#error/#warning: no state change, line blanked.
+    lineKinds.push('directive');
+  }
+
+  const blank = (s: string): string => s.replace(/[^\r]/g, ' ');
+  const textLines: string[] = [];
+  const evidenceLines: string[] = [];
+  const lineStarts: number[] = [];
+  let offset = 0;
+  for (let i = 0; i < lines.length; i++) {
+    lineStarts.push(offset);
+    offset += lines[i]!.length + 1;
+    const kind = lineKinds[i]!;
+    const keepInText = kind !== 'directive' && kind !== 'inactive';
+    const keepInEvidence = kind === 'active';
+    textLines.push(keepInText ? lines[i]! : blank(lines[i]!));
+    evidenceLines.push(keepInEvidence ? lines[i]! : blank(lines[i]!));
+  }
+
+  const stateAt = (index: number): PpState => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (lineStarts[mid]! <= index) lo = mid;
+      else hi = mid - 1;
+    }
+    const kind = lineKinds[lo];
+    return kind === 'directive' || kind === undefined ? 'unknown' : kind;
+  };
+
+  return { text: textLines.join('\n'), evidence: evidenceLines.join('\n'), stateAt };
+}
+
 function findMatchingBrace(content: string, openIndex: number): number {
   let depth = 0;
   for (let i = openIndex; i < content.length; i++) {
@@ -483,54 +687,92 @@ function stripGenericSuffix(base: string): string {
 }
 
 // Full alias-resolved dotted base form (generic suffix stripped) — e.g.
-// `FishNet.Object.NetworkBehaviour`. Used for gate FQ-base evidence (F2).
-function resolveBaseFull(base: string, aliases: Map<string, string>): string {
+// `FishNet.Object.NetworkBehaviour`. Used for gate FQ-base evidence (F2). Alias lookups are
+// positional so a namespace-scoped alias only applies inside its own scope (B2, round 5).
+function resolveBaseFull(
+  base: string,
+  resolveAlias: (name: string, pos: number) => string | null,
+  pos: number
+): string {
   let value = stripGenericSuffix(base.trim());
   const dot = value.indexOf('.');
   if (dot !== -1) {
     const head = value.slice(0, dot);
-    const alias = aliases.get(head);
+    const alias = resolveAlias(head, pos);
     if (alias) value = `${alias}${value.slice(dot)}`;
   } else {
-    value = aliases.get(value) || value;
+    value = resolveAlias(value, pos) || value;
   }
   return value;
 }
 
-// Parse C# using-alias directives (`using <Name> = <target>;`) TOKEN-WISE from anywhere in the
-// (masked) file — same-line, multiple per line, inside namespace blocks (BLOCKING 2 r3). The
-// returned map is used only for BASE type resolution (resolveBaseFull). Attribute provenance no
-// longer resolves alias targets; see aliasBoundNames for the KILL rule.
-//
-// A base alias is resolvable ONLY when the name has EXACTLY ONE distinct binding across the whole
-// file AND that single target is a plain dotted identifier we can expand. Two or more distinct
-// bindings for one simple name are namespace-scoped aliases with NO file-global last-wins meaning
-// (BLOCKING 4, round 4): the old last-wins map let a later `namespace B { using NB = Mirror.Network‐
-// Behaviour; }` fabricate an owning base for a `namespace A { using NB = Other.Base; }` class. When
-// a token is ambiguous we leave it UNRESOLVED so the class using it is never falsely rooted (the
-// complementary missed edge is acceptable). A non-dotted target (`global::…`, extern `::`, generic)
-// is likewise left unresolved here (safe); the KILL set still fires on it via aliasBoundNames.
-function parseAliases(content: string): Map<string, string> {
-  const bindings = new Map<string, Set<string>>();
+// One C# using-alias directive (`using <Name> = <target>;`), with the span it is visible in and
+// the preprocessor state of its own position. Parsed TOKEN-WISE from anywhere in the (masked)
+// file — same-line, multiple per line, inside namespace blocks (BLOCKING 2 r3).
+interface AliasDecl {
+  name: string;
+  target: string;
+  /** The enclosing namespace declaration's span — the alias is visible only inside it (B2 r5). */
+  scopeStart: number;
+  scopeEnd: number;
+  /** Preprocessor state at the directive: only an 'active' alias may resolve positively (B3 r5). */
+  state: PpState;
+}
+
+// A C# using-alias is scoped to its enclosing namespace DECLARATION (file-scoped namespaces and
+// the global scope span to EOF; nested block namespaces see outer aliases via span containment).
+// The old file-global map applied a namespace-scoped alias to classes OUTSIDE its C# scope, which
+// fabricated ownership across namespaces (B2, round 5). Directives always precede members inside a
+// scope, so span containment is a sound visibility test.
+function parseAliasDecls(
+  safe: string,
+  nsSpans: Array<{ name: string; start: number; end: number }>,
+  stateAt: (index: number) => PpState
+): AliasDecl[] {
+  const decls: AliasDecl[] = [];
   const regex = /\busing\s+([A-Za-z_]\w*)\s*=\s*([^;]+?)\s*;/g;
   let match: RegExpExecArray | null;
-  while ((match = regex.exec(content)) !== null) {
-    const name = match[1]!;
-    const target = match[2]!.replace(/\s+/g, '');
-    let set = bindings.get(name);
-    if (!set) {
-      set = new Set<string>();
-      bindings.set(name, set);
+  while ((match = regex.exec(safe)) !== null) {
+    let scopeStart = 0;
+    let scopeEnd = safe.length;
+    let innermost = -1;
+    for (const span of nsSpans) {
+      if (span.start <= match.index && match.index <= span.end && span.start > innermost) {
+        innermost = span.start;
+        scopeStart = span.start;
+        scopeEnd = span.end;
+      }
     }
-    set.add(target);
+    decls.push({
+      name: match[1]!,
+      target: match[2]!.replace(/\s+/g, ''),
+      scopeStart,
+      scopeEnd,
+      state: stateAt(match.index),
+    });
   }
-  const aliases = new Map<string, string>();
-  for (const [name, targets] of bindings) {
-    if (targets.size !== 1) continue; // ambiguous namespace-scoped alias — leave unresolved
+  return decls;
+}
+
+// Positional base-alias resolution. A name resolves at a position ONLY when the visible (span
+// contains the position), provably-active alias declarations for it agree on EXACTLY ONE distinct
+// target AND that target is a plain dotted identifier we can expand. Everything else — two or more
+// distinct visible bindings (BLOCKING 4, round 4), a `global::`/extern-`::`/generic target (its
+// bare-token fallback is separately killed via aliasBoundNames — B1, round 5), an alias in an
+// uncertain `#if` region — leaves the token UNRESOLVED so a class using it is never falsely rooted
+// (the complementary missed edge is acceptable).
+function makeAliasResolver(decls: AliasDecl[]): (name: string, pos: number) => string | null {
+  return (name, pos) => {
+    const targets = new Set<string>();
+    for (const d of decls) {
+      if (d.name !== name || d.state !== 'active') continue;
+      if (pos < d.scopeStart || pos > d.scopeEnd) continue;
+      targets.add(d.target);
+    }
+    if (targets.size !== 1) return null;
     const target = [...targets][0]!;
-    if (/^[A-Za-z_][\w.]*$/.test(target)) aliases.set(name, target);
-  }
-  return aliases;
+    return /^[A-Za-z_][\w.]*$/.test(target) ? target : null;
+  };
 }
 
 // Every simple name bound by a `using <Name> = …;` alias directive anywhere in the file, regardless
@@ -623,11 +865,15 @@ function sameHostInfo(a: HostInfo, b: HostInfo): boolean {
 // (`Other.Root`) or alias-expanded into a foreign namespace, denotes a specific external type and
 // must never be shortened into a same-file class that merely shares its last segment. Owning FQ
 // bases (`Mirror.NetworkBehaviour`) are admitted directly by classifyHost, not through this
-// same-file name chain, so excluding all dotted bases here loses no real edge.
-function chainableBase(cls: ClassBlock, byName: Map<string, HostInfo>): string | null {
+// same-file name chain, so excluding all dotted bases here loses no real edge. A bare token the
+// file binds with ANY using-alias is also excluded (B1/B2, round 5): a bare survivor of alias
+// resolution means the alias did not expand (unresolvable target, ambiguity, or out-of-scope use),
+// and C# would bind the token to the alias — chaining it to a same-named local class fabricates.
+function chainableBase(cls: ClassBlock, byName: Map<string, HostInfo>, aliasBound: Set<string>): string | null {
   for (let i = 0; i < cls.bases.length; i++) {
     if (cls.fullBases[i]!.includes('.')) continue;
     const bare = cls.bases[i]!;
+    if (aliasBound.has(bare)) continue;
     if (byName.has(bare)) return bare;
   }
   return null;
@@ -638,8 +884,15 @@ function parseClassBlocks(
   filePath: string
 ): { classes: ClassBlock[]; openStacks: GatedStack[]; killedAttrNames: Set<string> } {
   const noComments = stripCommentsForRegex(content, 'csharp');
-  const safe = maskStringLiterals(noComments);
-  const aliases = parseAliases(safe);
+  const masked = maskStringLiterals(noComments);
+  // Preprocessor pass (B3, round 5) AFTER comment-strip + string-mask (so `// #if false` and
+  // `"#if false"` are non-evidence): provably-inactive regions and directive lines are blanked
+  // from the parse text — an `#if false` block is not compiled, exactly like a comment.
+  const pp = analyzePreprocessor(masked);
+  const safe = pp.text;
+  const nsSpans = namespaceSpans(safe);
+  const aliasDecls = parseAliasDecls(safe, nsSpans, pp.stateAt);
+  const resolveAlias = makeAliasResolver(aliasDecls);
   const classes: ClassBlock[] = [];
   const classRegex = /(?:\b(?:public|private|protected|internal|sealed|abstract|partial|static|new)\s+)*class\s+([A-Za-z_]\w*)(?:\s*:\s*([^{]+))?\s*\{/g;
   let match: RegExpExecArray | null;
@@ -649,7 +902,7 @@ function parseClassBlocks(
     const closeBrace = findMatchingBrace(safe, openBrace);
     if (closeBrace === -1) continue;
     const baseTokens = splitTopLevel(match[2] || '');
-    const fullBases = baseTokens.map((b) => resolveBaseFull(b, aliases));
+    const fullBases = baseTokens.map((b) => resolveBaseFull(b, resolveAlias, match!.index));
     const bases = fullBases.map((b) => b.split('.').pop() || b);
     const header = match[0]!.slice(0, match[0]!.indexOf('class'));
     classes.push({
@@ -672,7 +925,7 @@ function parseClassBlocks(
 
   // Gate resolution happens AFTER class parsing so FQ-base evidence (F2) can be checked
   // against real base clauses. Exclusion is still pre-parse (inside openStacksFor).
-  const openStacks = openStacksFor(safe, classes);
+  const openStacks = openStacksFor(safe, pp.evidence, classes, pp.stateAt);
 
   // Every type NAME declared in this file (classes + interfaces/structs/enums/records). Two uses:
   //  - LOCAL SHADOW (BLOCKING 5): a bare gated token the file redeclares binds to the local type,
@@ -682,17 +935,19 @@ function parseClassBlocks(
   const nonClassTypeNames = collectNonClassTypeNames(safe);
   const localTypeNames = new Set<string>(nonClassTypeNames);
   for (const cls of classes) localTypeNames.add(cls.name);
-  const killedAttrNames = buildKilledAttrNames(aliasBoundNames(safe), localTypeNames);
+  const aliasBound = aliasBoundNames(safe);
+  const killedAttrNames = buildKilledAttrNames(aliasBound, localTypeNames);
 
   // Direct host classification from a class's OWN resolved bases. fullBases carries the dotted
   // form so classifyHost distinguishes a foreign FQ token from an owning stack's FQ alternative
   // (BLOCKING 1); the returned HostInfo carries the open owning stacks so FQ ownership can
   // propagate (BLOCKING 2). `localTypeNames` shadows a bare gated token the file redeclares
-  // (BLOCKING 5). Evaluated per-block (not read back from the name map) so partial class blocks
+  // (BLOCKING 5); `aliasBound` shadows a bare token that survived alias resolution unexpanded
+  // (B1, round 5). Evaluated per-block (not read back from the name map) so partial class blocks
   // sharing a name stay independent — a base-less partial block is not a host.
   const directInfoFor = (cls: ClassBlock): HostInfo | null => {
     for (const full of cls.fullBases) {
-      const info = classifyHost(full, openStacks, localTypeNames);
+      const info = classifyHost(full, openStacks, localTypeNames, aliasBound);
       if (info) return info;
     }
     return null;
@@ -708,7 +963,7 @@ function parseClassBlocks(
   const topLevelSet = new Set(topLevelClasses);
 
   // Enclosing-namespace label per top-level block — the identity check for partial merging below.
-  const nsSpans = namespaceSpans(safe);
+  // (nsSpans was computed up top, before alias parsing, since alias scoping needs it too.)
   const nsLabelOf = new Map<ClassBlock, string>();
   for (const cls of topLevelClasses) nsLabelOf.set(cls, namespaceLabelAt(nsSpans, cls.declIndex));
 
@@ -775,7 +1030,7 @@ function parseClassBlocks(
     for (const cls of topLevelClasses) {
       if (directHostByName.has(cls.name)) continue;
       if (ambiguousNames.has(cls.name)) continue;
-      const inheritedBase = chainableBase(cls, directHostByName);
+      const inheritedBase = chainableBase(cls, directHostByName, aliasBound);
       if (inheritedBase) {
         directHostByName.set(cls.name, directHostByName.get(inheritedBase)!);
         changed = true;
@@ -785,7 +1040,7 @@ function parseClassBlocks(
 
   const resolved = classes.map((cls) => {
     const direct = directInfoFor(cls);
-    const chainedBase = chainableBase(cls, directHostByName);
+    const chainedBase = chainableBase(cls, directHostByName, aliasBound);
     let info = direct ?? (chainedBase ? directHostByName.get(chainedBase)! : null);
     // SHOULD-FIX 1 (round 4): a base-less block of a merged all-partial type carries no base of its
     // own and has no base token to chain FROM, so its members would be lost. Inherit the descriptor
