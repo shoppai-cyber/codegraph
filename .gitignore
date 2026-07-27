@@ -69,6 +69,14 @@ assets/__pycache__/
 
 assets/generate-waitlist.py
 
+.kommandr/
+
+# Local scratch tests (never commit)
+__tests__/zz-scratch*
+
+# linux-arm64 kernel cross-build cache (rust:1-bookworm builder)
+target-linux/
+
 # Fork-local working scratch (not upstream). scratch/ is ignored working space
 # EXCEPT scratch/reports/, which holds tracked CodeGraph issue-intake reports
 # routed from AGENTS.md / CLAUDE.md.
