@@ -107,20 +107,109 @@ mid-rebuild tree for the duration. A worktree keeps the primary checkout on
 Both sides register things in the same files; resolution is almost always
 **union (keep both sides)**:
 
-| File | What conflicts | Resolution |
-|---|---|---|
-| `src/extraction/grammars.ts` | language/wasm registrations | keep both registrations |
-| `src/extraction/tree-sitter.ts` | routing entries (incl. our `unity_yaml` content-gated routing) | keep both |
-| `src/extraction/unity-asset-extractor.ts` | fork-only; **holds the `isUnityYaml()` content check** | ours — should never conflict |
-| `src/resolution/frameworks/index.ts` | resolver registry entries | keep both entries |
-| `src/types.ts` | NodeKind/EdgeKind/metadata additions | **append only, never reorder** (see kernel wire contract below) |
-| `src/db/index.ts`, `src/db/sqlite-adapter.ts` | our read-only/immutable open (d601654) vs upstream's WAL + bulk-load work | **not a registry — real shared logic.** See the d601654 note below |
-| `CHANGELOG.md` | `[Unreleased]` entries | **not a plain union** — see the trap below |
-| `package.json` / lock | new deps (rare — grammars ship as checked-in `.wasm`) | union `package.json`, then `npm install` to regenerate the lock; never hand-edit the lock |
-| `AGENTS.md` / `CLAUDE.md` | doc drift | fork-specific sections are ours; upstream edits to shared how-codegraph-works content win |
+**This table mispredicted twice on the 2026-07-27 sync, in both directions.**
+The `1.5.0 verdict` column records what actually happened, because a table that
+was wrong and doesn't say so is worse than no table:
+
+| File | What conflicts | Resolution | 1.5.0 verdict |
+|---|---|---|---|
+| `src/extraction/grammars.ts` | language/wasm registrations | keep both registrations | **FALSIFIED** — auto-merged |
+| `src/extraction/tree-sitter.ts` | routing entries (incl. our `unity_yaml` content-gated routing) | keep both | **FALSIFIED** — auto-merged |
+| `src/extraction/unity-asset-extractor.ts` | fork-only; **holds the `isUnityYaml()` content check** | ours — should never conflict | held (no conflict) |
+| `src/resolution/frameworks/index.ts` | resolver registry entries | keep both entries | **FALSIFIED** — auto-merged |
+| `src/types.ts` | NodeKind/EdgeKind/metadata additions | **append only, never reorder** (see kernel wire contract below) | **FALSIFIED** — auto-merged |
+| `src/db/index.ts`, `src/db/sqlite-adapter.ts` | our read-only/immutable open (d601654) vs upstream's WAL + bulk-load work | **not a registry — real shared logic.** See the d601654 note below | **MISSED** — row added *after* the sync; both real conflicts landed here |
+| `.gitignore` | fork-local ignores vs upstream's | union | **MISSED** — was not in the table |
+| `CHANGELOG.md` | `[Unreleased]` entries | **not a plain union** — see the trap below | correct (2 hunks) |
+| `package.json` / lock | new deps (rare — grammars ship as checked-in `.wasm`) | union `package.json`, then `npm install` to regenerate the lock; never hand-edit the lock | no conflict |
+| `AGENTS.md` / `CLAUDE.md` | doc drift | fork-specific sections are ours; upstream edits to shared how-codegraph-works content win | no conflict |
+
+Read the verdict column as a lesson, not a scoreboard: **the four registry
+hotspots the table was built around are the ones that did NOT conflict, and the
+only real conflicts were in the one file where the fork changed shared logic.**
+Registry appends are cheap; shared-logic edits are not. §4a measures why.
 
 Anything conflicting outside this table: stop and read both sides properly —
 it means one of us changed shared logic, not just a registry.
+
+### 4a. Why this fork is cheap to update — the measurement
+
+Do not guess at the risk surface; it is measurable in one command, and the
+measurement is the fork's central safety property:
+
+```bash
+git diff --stat upstream/main...main | tail -1
+# 70 files changed, 21,366 insertions(+), 53 deletions(-)   (2026-07-27, post-UXML)
+
+git diff --stat --diff-filter=A upstream/main...main | tail -1   # fork-only files
+# 57 files changed, 20,814 insertions(+)
+git diff --stat --diff-filter=M upstream/main...main | tail -1   # shared files
+# 13 files changed, 552 insertions(+), 53 deletions(-)
+```
+
+**21,366 insertions against 53 deletions.** That ratio *is* the safety property.
+Deletions and rewrites are what break merges; this fork barely does any.
+**20,814 of those lines — 97% — are in fork-only files** upstream cannot
+conflict with by construction (`src/resolution/frameworks/unity.ts`,
+`unity-assets.ts`, `unity-uxml.ts`, `blender.ts`, `cfml.ts`,
+`unity-asset-extractor.ts`, `uxml-extractor.ts`, their tests, and this runbook).
+
+Watch the deletion count, not the insertion count, when re-measuring. Before
+UXML landed this read 20,146 / 53; the feature added ~1,200 insertions and
+**zero** deletions. Insertions growing while deletions stay flat is the fork
+staying cheap to update. A jump in deletions is the signal to look hard.
+
+The entire genuine risk surface is **302 changed lines across 9 shared source
+files**, and it splits three ways — the split, not the total, is what makes
+future features decidable:
+
+| | Files (changed lines) | Total | Character |
+|---|---|---|---|
+| **REAL RISK** | `src/db/index.ts` (101), `src/db/sqlite-adapter.ts` (27), `src/index.ts` (21) | 149 | read-only mode (d601654) — **real shared logic**, rewrites upstream's own code paths |
+| **REGISTRATION** | `src/extraction/grammars.ts` (21), `src/extraction/tree-sitter.ts` (19), `src/resolution/frameworks/index.ts` (15), `src/types.ts` (11) | 66 | pure appends at list/map/switch boundaries |
+| **LOCALIZED** | `src/bin/codegraph.ts` (62), `src/search/query-utils.ts` (25) | 87 | whole-function bodies the fork replaced (the `affected` test-detection fix) — conflicts if upstream touches the same function, but the resolution is legible |
+
+(The other 4 modified files are `CHANGELOG.md`, `CLAUDE.md`, `.gitignore`, and
+`__tests__/foundation.test.ts` — doc/test surface, not behavior.)
+
+Both unpredicted 1.5.0 conflicts landed in the REAL RISK row. That is now
+covered by the read-only-open-against-an-unhealed-index regression test, which
+makes that test **the single most important thing in the recent batch for this
+fork's updatability** — it is what turns a silent `SQLITE_READONLY` at the next
+sync into a red suite.
+
+The REGISTRATION row has an exact precedent to size any future work against.
+Adding `unity_yaml` cost: one `LANGUAGES` entry, three `EXTENSION_MAP` keys, one
+type exclusion, three one-line `if` guards, one display name, one import, one
+`else if`. ~20 lines, every one an append at a list/map/switch boundary inside a
+hunk the fork already owns. Adding `uxml` + `uss` in 2026-07 cost the same shape
+again — 66 lines across the same four files, for two languages, a standalone
+extractor, and a resolver — confirming the precedent rather than merely citing
+it.
+
+> **The load-bearing conclusion: ADDING A FILE TYPE OR RESOLVER IS NEAR-ZERO
+> MERGE RISK. TOUCHING `src/db/` IS NOT.**
+
+Use that to decide features, not intuition. UXML/USS sat entirely in the first
+category, which is why it landed without a merge question being asked. The
+strongest evidence for the rule: the 1.5.0 sync **replaced the whole extraction
+engine**, swapping wasm tree-sitter for a native Rust kernel — and all ~4,800
+lines of fork resolver code came through untouched.
+
+**Two settled decisions, recorded so they stop being re-litigated:**
+
+- **A patch-file approach was considered and REJECTED.** A patch applies blind
+  and rots silently; a merge reports exactly where and why it cannot apply. The
+  additive-file structure **is** the durable form of a re-appliable patch, with
+  the failure reporting built in.
+- **Per-framework builds (separate vanilla / Unity / Blender versions) were
+  considered and REJECTED.** `FrameworkResolver.detect()`
+  (`src/resolution/types.ts:202`) is a project-level gate called once at
+  startup, and `unity.ts`'s is a real one, so a non-Unity repo never runs the
+  Unity resolver. Splitting would triple the merge burden to solve a problem the
+  resolver contract already solves. The one legitimate second copy is a
+  temporary pin at a known-good commit to bisect a broken sync — an escape
+  hatch, not an architecture.
 
 **`src/types.ts` is no longer a free union.** As of upstream 1.5.0,
 `NODE_KINDS` / `EDGE_KINDS` are runtime-iterable const arrays whose **array
