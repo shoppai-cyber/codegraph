@@ -3895,6 +3895,163 @@ class Player : NetworkBehaviour
 `);
       expect(result).toEqual({ nodes: [], references: [] });
     });
+
+    // --- Expression-bodied members must not self-collide (parseMethods dedupe) ---
+    //
+    // `declarationRegex`'s `\([^;{}]*\)\s*;` does not stop at `=>`: for
+    //   void OnTeamIndexChanged(int _, int next) => ApplyTeam(next);
+    // the `[^;{}]*` span happily runs through the arrow and the expression
+    // body's own parens, so the member registered TWICE — once from
+    // `expressionRegex`, once as a declaration. `uniqueMethod` then saw
+    // matches.length === 2, read it as an overload, and emitted nothing.
+    // Both shapes must resolve identically.
+
+    it('resolves a SyncVar hook whose target is EXPRESSION-BODIED', () => {
+      const result = extract(`
+using Mirror;
+
+class PlayerTeamSkin : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnTeamIndexChanged))] int teamIndex;
+    void OnTeamIndexChanged(int _, int next) => ApplyTeam(next);
+    void ApplyTeam(int index) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY SyncVar field PlayerTeamSkin.teamIndex',
+          'UNITY SyncVar hook PlayerTeamSkin.OnTeamIndexChanged',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:field:PlayerTeamSkin.teamIndex',
+          'references:unity:method:PlayerTeamSkin.OnTeamIndexChanged',
+        ].sort()
+      );
+    });
+
+    it('resolves a SyncVar hook whose target is BLOCK-BODIED (unchanged behaviour)', () => {
+      const result = extract(`
+using Mirror;
+
+class PlayerTeamSkin : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnTeamIndexChanged))] int teamIndex;
+    void OnTeamIndexChanged(int _, int next) { ApplyTeam(next); }
+    void ApplyTeam(int index) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY SyncVar field PlayerTeamSkin.teamIndex',
+          'UNITY SyncVar hook PlayerTeamSkin.OnTeamIndexChanged',
+        ].sort()
+      );
+      expect(refPairs(result)).toEqual(
+        [
+          'references:unity:field:PlayerTeamSkin.teamIndex',
+          'references:unity:method:PlayerTeamSkin.OnTeamIndexChanged',
+        ].sort()
+      );
+    });
+
+    it('resolves BOTH shapes side by side in one class', () => {
+      // The field case: several hooks on one component, only the
+      // expression-bodied one silently missing.
+      const result = extract(`
+using Mirror;
+
+class PlayerTeamSkin : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnTeamIndexChanged))] int teamIndex;
+    [SyncVar(hook = nameof(OnReadyChanged))] bool ready;
+
+    void OnTeamIndexChanged(int _, int next) => ApplyTeam(next);
+    void OnReadyChanged(bool _, bool next) { ApplyReady(next); }
+    void ApplyTeam(int index) {}
+    void ApplyReady(bool v) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(
+        [
+          'UNITY SyncVar field PlayerTeamSkin.teamIndex',
+          'UNITY SyncVar field PlayerTeamSkin.ready',
+          'UNITY SyncVar hook PlayerTeamSkin.OnTeamIndexChanged',
+          'UNITY SyncVar hook PlayerTeamSkin.OnReadyChanged',
+        ].sort()
+      );
+    });
+
+    it('still suppresses a hook naming a genuinely OVERLOADED expression-bodied method', () => {
+      // The dedupe keys on match index, so two real overloads stay two.
+      const result = extract(`
+using Mirror;
+
+class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(OnHealthChanged))] int health;
+    void OnHealthChanged(int _, int next) => Apply(next);
+    void OnHealthChanged(float _, float next) => Apply(next);
+    void Apply(float v) {}
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+
+    it('still suppresses a hook naming a bodiless declaration with a DEFAULT PARAMETER', () => {
+      // Contract pin, not a regression: `int depth = 5` is exactly why
+      // `declarationRegex`'s `[^;{}]*` must keep accepting `=`. A fix that
+      // excluded `=` to stop the double-registration above would stop matching
+      // this declaration at all.
+      const result = extract(`
+using Mirror;
+
+abstract class Player : NetworkBehaviour
+{
+    [SyncVar(hook = nameof(Rebuild))] int health;
+    protected abstract void Rebuild(int depth = 5);
+}
+`);
+      expect(nodeNames(result)).toEqual(['UNITY SyncVar field Player.health']);
+      expect(refPairs(result)).toEqual(['references:unity:field:Player.health']);
+    });
+  });
+
+  describe('uniqueMethod call sites — expression-bodied targets', () => {
+    // parseMethods' double-registration hit every uniqueMethod consumer, not
+    // just SyncVar hooks. These pin the other two.
+
+    it('resolves an EXPRESSION-BODIED [ContextMenuItem] target', () => {
+      const result = extract(`
+using UnityEngine;
+
+class Spawner : MonoBehaviour
+{
+    [ContextMenuItem("Reset", "ResetCount")] public int count;
+    void ResetCount() => count = 0;
+}
+`);
+      expect(nodeNames(result)).toContain('UNITY string-invoke ContextMenuItem Spawner.ResetCount');
+    });
+
+    it('resolves an EXPRESSION-BODIED Invoke/StartCoroutine target', () => {
+      const result = extract(`
+using UnityEngine;
+
+class Spawner : MonoBehaviour
+{
+    void Start()
+    {
+        Invoke("SpawnOne", 1f);
+    }
+
+    void SpawnOne() => Debug.Log("spawn");
+}
+`);
+      expect(nodeNames(result)).toContain('UNITY string-invoke Invoke Spawner.SpawnOne');
+    });
   });
 
   describe('detect(), claimsReference(), and resolve()', () => {
