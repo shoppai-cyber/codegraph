@@ -441,6 +441,84 @@ describe('Database Connection', () => {
       readOnly.close();
     }
   });
+
+  /**
+   * Read-only open against an UNHEALED index (fork guard, see FORK-MAINTENANCE.md).
+   *
+   * `open()` self-heals a bulk-load window that a crash left open, and healing
+   * WRITES — an FTS rebuild plus CREATE TRIGGER. Ungated, that turns every
+   * read-only open of such an index into SQLITE_READONLY, which no read-only
+   * consumer can do anything about. The guard in `openConfigured` skips the
+   * heal when `readOnly` is set; the accepted degradation is a stale
+   * `nodes_fts` (search recall only) until something opens the project
+   * writable.
+   *
+   * This is the fork's ONLY change to shared upstream logic and it lives in the
+   * file where both of the 1.5.0 sync's unpredicted conflicts landed, so a
+   * future merge that drops the guard would otherwise go green.
+   */
+  describe('read-only open of an index with an unclosed bulk-load window', () => {
+    const TRIGGERS = `SELECT count(*) AS c FROM sqlite_master
+        WHERE type = 'trigger' AND name IN ('nodes_ai','nodes_ad','nodes_au')`;
+
+    function seedUnhealed(dbPath: string): void {
+      const db = DatabaseConnection.initialize(dbPath);
+      const raw = db.getDb();
+      raw.prepare(
+        `INSERT INTO nodes (id, kind, name, qualified_name, file_path, language,
+           start_line, end_line, start_column, end_column, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      ).run('n1', 'function', 'alpha', 'mod.alpha', 'src/mod.ts', 'typescript', 1, 2, 0, 0, 1);
+      raw.prepare(
+        `INSERT INTO nodes (id, kind, name, qualified_name, file_path, language,
+           start_line, end_line, start_column, end_column, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+      ).run('n2', 'function', 'beta', 'mod.beta', 'src/mod.ts', 'typescript', 4, 5, 0, 0, 1);
+      raw.prepare('INSERT INTO edges (source, target, kind) VALUES (?,?,?)').run('n1', 'n2', 'calls');
+
+      // Crash simulation: enter the bulk-load window (drops the FTS triggers)
+      // and close without ever calling endBulkNodeLoad().
+      db.beginBulkNodeLoad();
+      db.close();
+    }
+
+    it('opens, keeps nodes and edges intact, and leaves the heal for a writable open', () => {
+      const dbPath = path.join(tempDir, 'unhealed.db');
+      seedUnhealed(dbPath);
+
+      // Precondition — without this the test would pass vacuously.
+      const probe = DatabaseConnection.open(dbPath, { readOnly: true });
+      expect((probe.getDb().prepare(TRIGGERS).get() as { c: number }).c).toBe(0);
+      probe.close();
+
+      // The assertion that matters: this threw SQLITE_READONLY before the guard.
+      let readOnly: DatabaseConnection | null = null;
+      expect(() => {
+        readOnly = DatabaseConnection.open(dbPath, { readOnly: true });
+      }).not.toThrow();
+
+      try {
+        const raw = readOnly!.getDb();
+        expect((raw.prepare('SELECT count(*) AS c FROM nodes').get() as { c: number }).c).toBe(2);
+        expect((raw.prepare('SELECT count(*) AS c FROM edges').get() as { c: number }).c).toBe(1);
+        expect(
+          (raw.prepare('SELECT name FROM nodes WHERE id = ?').get('n1') as { name: string }).name
+        ).toBe('alpha');
+        // Accepted degradation: the read-only open did NOT heal.
+        expect((raw.prepare(TRIGGERS).get() as { c: number }).c).toBe(0);
+      } finally {
+        readOnly!.close();
+      }
+
+      // ...and the heal itself still works on the next writable open.
+      const writable = DatabaseConnection.open(dbPath);
+      try {
+        expect((writable.getDb().prepare(TRIGGERS).get() as { c: number }).c).toBe(3);
+      } finally {
+        writable.close();
+      }
+    });
+  });
 });
 
 describe('Query Builder', () => {

@@ -42,6 +42,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { getCodeGraphDir, isInitialized, unsafeIndexRootReason, findNearestCodeGraphRoot, planFrontload, hasStructuralKeyword, extractCodeTokens } from '../directory';
 import { extractProseCandidates } from '../search/identifier-segments';
+import { isTestFile } from '../search/query-utils';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
@@ -2135,15 +2136,10 @@ program
       const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const maxDepth = parseInt(options.depth || '5', 10);
 
-      // Common test file patterns
-      const defaultTestPatterns = [
-        /\.spec\./,
-        /\.test\./,
-        /\/__tests__\//,
-        /\/tests?\//,
-        /\/e2e\//,
-        /\/spec\//,
-      ];
+      // `e2e/` is the one convention the shared `isTestFile` helper does not
+      // know. Everything else this command used to match locally, the helper
+      // matches as a superset — see below.
+      const e2eDir = /(?:^|\/)e2e\//;
 
       // Custom filter pattern
       let customFilter: RegExp | null = null;
@@ -2157,9 +2153,23 @@ program
         customFilter = new RegExp(regex);
       }
 
-      function isTestFile(filePath: string): boolean {
+      // Default detection delegates to the SHARED heuristic
+      // (`src/search/query-utils.ts`). This command used to keep a private copy
+      // of the patterns, which silently diverged: the local `/\/tests?\//` was
+      // case-sensitive and there was no filename rule at all, so a .NET/Unity
+      // `Assets/Game/Tests/PlayerNetworkDriverTests.cs` matched nothing and the
+      // command confidently reported "no test files affected". The shared
+      // helper lowercases the path AND knows CamelCase suffixes/source-set
+      // dirs, so either rule alone would have caught it.
+      //
+      // The helper is a superset of the old patterns except for `e2e/`, which
+      // it does not model — kept here so fixing one false negative doesn't
+      // introduce another. (It is also broader in one direction: it treats
+      // `fixtures/`, `integration/`, `examples/` etc. as non-production. For
+      // "which tests should I run", pulling those in is the safe direction.)
+      function isAffectedTestFile(filePath: string): boolean {
         if (customFilter) return customFilter.test(filePath);
-        return defaultTestPatterns.some(p => p.test(filePath));
+        return isTestFile(filePath) || e2eDir.test(filePath);
       }
 
       // BFS to find all transitive dependents of changed files, filtered to test files
@@ -2168,7 +2178,7 @@ program
 
       for (const file of changedFiles) {
         // If the changed file is itself a test file, include it
-        if (isTestFile(file)) {
+        if (isAffectedTestFile(file)) {
           affectedTests.add(file);
           continue;
         }
@@ -2188,7 +2198,7 @@ program
             visited.add(dep);
             allDependents.add(dep);
 
-            if (isTestFile(dep)) {
+            if (isAffectedTestFile(dep)) {
               affectedTests.add(dep);
             } else {
               queue.push({ file: dep, depth: current.depth + 1 });

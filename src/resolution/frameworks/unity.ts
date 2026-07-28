@@ -2001,9 +2001,31 @@ function parseMethods(cls: ClassBlock, originalContent: string): MethodDecl[] {
     });
   }
 
+  // A member already registered by the block-bodied or expression-bodied pass
+  // must not register a SECOND time as a bodiless declaration. `declarationRegex`
+  // below cannot distinguish the two: its parameter span `[^;{}]*` excludes only
+  // `;{}`, so for
+  //     void OnTeamIndexChanged(int _, int next) => ApplyTeam(next);
+  // it runs straight through the `=>` and the expression body's own parens,
+  // closes on the body's `)`, and finds the statement's `;`. The member then
+  // appears twice, `uniqueMethod` reads matches.length === 2 as an overload, and
+  // every route through it (SyncVar hooks, [ContextMenuItem], the
+  // Invoke/SendMessage/StartCoroutine string-invoke family) silently emits
+  // nothing. Only expression bodies CONTAINING parens collide; that is why most
+  // hooks in a real project keep working and this stayed latent.
+  //
+  // Deduping on match index is deliberately preferred over tightening the
+  // character class: excluding `=` would stop matching legitimate bodiless
+  // declarations that carry default parameter values —
+  //     protected abstract void Rebuild(int depth = 5);
+  // — trading this bug for a worse one. Regex semantics stay untouched; two
+  // genuine overloads still occupy two distinct indexes and stay ambiguous.
+  const registeredAt = new Set(methods.map((m) => m.index));
+
   const declarationRegex = /((?:\[[^\]]+\]\s*)*)(?:(?:public|private|protected|internal|static|virtual|override|sealed|async|new|unsafe|extern|abstract)\s+)*[A-Za-z_][\w<>,\s\[\]?.]{0,512}\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*;/g;
   while ((match = declarationRegex.exec(cls.body)) !== null) {
     if (!topLevelAt(cls.body, match.index)) continue;
+    if (registeredAt.has(match.index)) continue;
     const header = match[0]!;
     methods.push({
       name: match[2]!,
