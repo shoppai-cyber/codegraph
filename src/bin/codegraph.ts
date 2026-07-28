@@ -42,7 +42,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { getCodeGraphDir, isInitialized, unsafeIndexRootReason, findNearestCodeGraphRoot, planFrontload, hasStructuralKeyword, extractCodeTokens } from '../directory';
 import { extractProseCandidates } from '../search/identifier-segments';
-import { isTestFile } from '../search/query-utils';
+import { isStrictTestFile } from '../search/query-utils';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
@@ -2136,9 +2136,9 @@ program
       const cg = await CodeGraph.open(projectPath, { readOnly: true });
       const maxDepth = parseInt(options.depth || '5', 10);
 
-      // `e2e/` is the one convention the shared `isTestFile` helper does not
-      // know. Everything else this command used to match locally, the helper
-      // matches as a superset — see below.
+      // `e2e/` is the one convention the shared helper does not know.
+      // Everything else this command used to match locally, it matches as a
+      // superset — see below.
       const e2eDir = /(?:^|\/)e2e\//;
 
       // Custom filter pattern
@@ -2164,12 +2164,20 @@ program
       //
       // The helper is a superset of the old patterns except for `e2e/`, which
       // it does not model — kept here so fixing one false negative doesn't
-      // introduce another. (It is also broader in one direction: it treats
-      // `fixtures/`, `integration/`, `examples/` etc. as non-production. For
-      // "which tests should I run", pulling those in is the safe direction.)
+      // introduce another.
+      //
+      // `isStrictTestFile`, not `isTestFile`: the latter also reports
+      // non-production directories (`samples/`, `examples/`, `fixtures/`,
+      // `demos/`, `benchmarks/`, `integration/`), which is right for
+      // de-ranking search results and wrong for "which tests should I run" —
+      // `Assets/Game/Samples/Interaction/NetworkedDoor.cs` is production
+      // sample code, not test coverage. Genuine tests that merely LIVE under
+      // such a name (`tests/integration/`, `integrationTest/`) still match,
+      // because the test-dir rule fires before anything looks at
+      // "integration".
       function isAffectedTestFile(filePath: string): boolean {
         if (customFilter) return customFilter.test(filePath);
-        return isTestFile(filePath) || e2eDir.test(filePath);
+        return isStrictTestFile(filePath) || e2eDir.test(filePath);
       }
 
       // BFS to find all transitive dependents of changed files, filtered to test files

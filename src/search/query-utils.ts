@@ -275,9 +275,27 @@ export function scorePathRelevance(
 }
 
 /**
- * Check if a file path looks like a test file
+ * Check if a file path looks like a test file, OR sits in a non-production
+ * directory (samples, examples, fixtures, benchmarks, demos, integration).
+ * Both count as "de-prioritize this in search results", which is what every
+ * caller here wants.
+ *
+ * Callers that need "is this actually a test" — `codegraph affected`, which
+ * answers "which tests should I run" — want `isStrictTestFile` instead:
+ * `Samples/NetworkedDoor.cs` is production code, not test coverage.
  */
 export function isTestFile(filePath: string): boolean {
+  return isStrictTestFile(filePath) || matchesNonProductionDir(filePath.toLowerCase());
+}
+
+/**
+ * Positive test signals only: test filename conventions and test directories.
+ * Excludes the non-production-directory catch-all, so a genuine test that also
+ * lives under one of those names (`tests/integration/foo.js`, `integrationTest/`)
+ * still matches here — the test-dir rule fires before anything looks at
+ * "integration".
+ */
+export function isStrictTestFile(filePath: string): boolean {
   const lower = filePath.toLowerCase();
   const fileName = path.basename(filePath);   // original case — needed for camelCase boundaries
   const lowerName = fileName.toLowerCase();
@@ -312,10 +330,7 @@ export function isTestFile(filePath: string): boolean {
     return true;
   }
 
-  // Non-production directories: examples, samples, benchmarks, fixtures, demos.
-  // Check both mid-path (/integration/) and start-of-path (integration/) since
-  // file paths may be stored as relative paths without a leading slash.
-  return matchesNonProductionDir(lower);
+  return false;
 }
 
 /**
