@@ -1860,25 +1860,35 @@ program
       const seen = new Set<string>();
       const allCallers: Array<{ name: string; kind: string; filePath: string; startLine?: number }> = [];
 
+      /**
+       * A `file` node always starts at line 1, so printing its own start line
+       * reports a location that is wrong rather than merely absent — a
+       * reference anchored to a file was shown as `Foo.cs:1` no matter where
+       * the reference actually sat. The edge carries the real line, so prefer
+       * it for file-anchored callers. Symbol callers keep their declaration
+       * line, which is what they have always shown.
+       */
+      const callerLine = (c: { node: { kind: string; startLine?: number }; edge: { line?: number } }): number | undefined =>
+        c.node.kind === 'file' && c.edge.line ? c.edge.line : c.node.startLine;
+
+      const collect = (nodeId: string): void => {
+        for (const c of cg.getCallers(nodeId)) {
+          if (!seen.has(c.node.id)) {
+            seen.add(c.node.id);
+            allCallers.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: callerLine(c) });
+          }
+        }
+      };
+
       for (const match of matches) {
         const exactMatch = match.node.name === symbol || match.node.name.endsWith(`.${symbol}`) || match.node.name.endsWith(`::${symbol}`);
         if (!exactMatch && matches.length > 1) continue;
-        for (const c of cg.getCallers(match.node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallers.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
-        }
+        collect(match.node.id);
       }
 
       // Fallback: if exact filter removed everything, use the top match
       if (allCallers.length === 0 && matches[0]) {
-        for (const c of cg.getCallers(matches[0].node.id)) {
-          if (!seen.has(c.node.id)) {
-            seen.add(c.node.id);
-            allCallers.push({ name: c.node.name, kind: c.node.kind, filePath: c.node.filePath, startLine: c.node.startLine });
-          }
-        }
+        collect(matches[0].node.id);
       }
 
       const limited = allCallers.slice(0, limit);

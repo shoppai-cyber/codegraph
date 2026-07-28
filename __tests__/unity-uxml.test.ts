@@ -19,12 +19,14 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { UxmlExtractor, UssExtractor, resolveStyleSrc } from '../src/extraction/uxml-extractor';
 import { unityUxmlResolver } from '../src/resolution/frameworks/unity-uxml';
 import { getFrameworkResolver } from '../src/resolution/frameworks';
+import { getLogger, setLogger, silentLogger } from '../src/errors';
 import type { ResolutionContext, UnresolvedRef } from '../src/resolution/types';
 import type { ExtractionResult, Node } from '../src/types';
 import { CodeGraph } from '../src';
@@ -400,6 +402,36 @@ describe('unityUxmlResolver.extract — the inverted match', () => {
   it('does nothing for a non-C# file', () => {
     expect(unityUxmlResolver.extract!(MENU, '<ui:Button name="solo-button" />').references).toHaveLength(0);
   });
+
+  it('names the file in a debug log when the candidate cap truncates it', () => {
+    // The cap is a silent miss reintroduced at the boundary: past it, a file
+    // that DOES name an element produces no edge and reads exactly like a file
+    // that names none. It cannot be removed without an unbounded cap, so it
+    // has to be observable.
+    const logged: string[] = [];
+    const previous = getLogger();
+    setLogger({ ...silentLogger, debug: (m: string) => void logged.push(m) });
+    try {
+      const huge = Array.from({ length: 500 }, (_, i) => `var v${i} = "literal-${i}";`).join('\n');
+      const refs = unityUxmlResolver.extract!(CS, huge).references;
+      expect(refs).toHaveLength(400); // cap enforced, not raised
+      expect(logged.some((m) => m.includes(CS) && m.includes('cap'))).toBe(true);
+    } finally {
+      setLogger(previous);
+    }
+  });
+
+  it('stays silent when the cap is not reached', () => {
+    const logged: string[] = [];
+    const previous = getLogger();
+    setLogger({ ...silentLogger, debug: (m: string) => void logged.push(m) });
+    try {
+      unityUxmlResolver.extract!(CS, 'var a = "one"; var b = "two";');
+      expect(logged).toHaveLength(0);
+    } finally {
+      setLogger(previous);
+    }
+  });
 });
 
 describe('UXML end-to-end through a real index', () => {
@@ -483,5 +515,37 @@ describe('UXML end-to-end through a real index', () => {
       'Assets/Game/Presentation/Menu/Menu.uss',
       'Assets/Game/Presentation/UI/GameUI.uss',
     ]);
+  });
+
+  it('carries the literal\'s real line on the edge, not the file node\'s line 1', () => {
+    const solo = cg
+      .getNodesInFile('Assets/Game/Presentation/Menu/Menu.uxml')
+      .find((n) => n.name === 'solo-button')!;
+    const caller = cg
+      .getCallers(solo.id)
+      .find((c) => c.node.filePath === 'Assets/Game/Presentation/Menu/MenuScreen.cs')!;
+
+    // The anchor node is the FILE, whose own startLine is necessarily 1 — so
+    // anything reporting the source node's position reports a wrong location,
+    // not an absent one.
+    expect(caller.node.kind).toBe('file');
+    expect(caller.node.startLine).toBe(1);
+    expect(caller.edge.line).toBe(5); // where `"solo-button"` actually sits
+  });
+
+  it('CLI `callers` prints the reference\'s line, not :1', () => {
+    // Pins the data/display gap: the line was always in the DB, but `callers`
+    // read the source node's position and printed `MenuScreen.cs:1`.
+    const out = execFileSync(
+      process.execPath,
+      [path.resolve(__dirname, '../dist/bin/codegraph.js'), 'callers', 'solo-button', '-p', tempDir],
+      {
+        encoding: 'utf-8',
+        env: { ...process.env, CODEGRAPH_NO_DAEMON: '1', CODEGRAPH_WASM_RELAUNCHED: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    expect(out).toContain('MenuScreen.cs:5');
+    expect(out).not.toContain('MenuScreen.cs:1');
   });
 });
