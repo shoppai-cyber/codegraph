@@ -11,7 +11,7 @@ import * as fsp from 'fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { Language } from '../types';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unity_yaml' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unity_yaml' | 'uxml' | 'uss' | 'unknown'>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -173,6 +173,11 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.unity': 'unity_yaml',
   '.prefab': 'unity_yaml',
   '.asset': 'unity_yaml',
+  // Unity UI Toolkit. Parsed by the standalone UxmlExtractor/UssExtractor —
+  // named-element nodes + `<Style src>` imports. Own languages rather than
+  // `xml`, which already routes to the MyBatis extractor.
+  '.uxml': 'uxml',
+  '.uss': 'uss',
   // Terraform / OpenTofu / HCL config — tree-sitter-terraform dialect of HCL.
   '.tf': 'terraform',
   '.tfvars': 'terraform',
@@ -544,6 +549,7 @@ export function isLanguageSupported(language: Language): boolean {
   if (language === 'xml') return true; // MyBatis mapper extractor
   if (language === 'properties') return true; // Spring config keys
   if (language === 'unity_yaml') return true; // custom UnityAssetExtractor (scene/prefab wiring)
+  if (language === 'uxml' || language === 'uss') return true; // custom UI Toolkit extractors
   if (language === 'unknown') return false;
   return language in WASM_GRAMMAR_FILES;
 }
@@ -556,6 +562,7 @@ export function isGrammarLoaded(language: Language): boolean {
   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
   if (language === 'unity_yaml') return true; // no WASM grammar needed (custom extractor)
+  if (language === 'uxml' || language === 'uss') return true; // no WASM grammar needed (custom extractors)
   return languageCache.has(language);
 }
 
@@ -660,6 +667,8 @@ export function getLanguageDisplayName(language: Language): string {
     cfscript: 'CFScript',
     cfquery: 'CFQuery (SQL)',
     unity_yaml: 'Unity YAML',
+    uxml: 'Unity UXML',
+    uss: 'Unity USS',
     cobol: 'COBOL',
     vbnet: 'Visual Basic .NET',
     erlang: 'Erlang',

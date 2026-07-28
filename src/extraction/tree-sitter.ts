@@ -28,6 +28,7 @@ import { SvelteExtractor } from './svelte-extractor';
 import { AstroExtractor } from './astro-extractor';
 import { DfmExtractor } from './dfm-extractor';
 import { UnityAssetExtractor } from './unity-asset-extractor';
+import { UxmlExtractor, UssExtractor } from './uxml-extractor';
 import { VueExtractor } from './vue-extractor';
 import { MyBatisExtractor } from './mybatis-extractor';
 import { CfmlExtractor } from './cfml-extractor';
@@ -6717,6 +6718,17 @@ export function extractFromSource(
     // GameObject/prefab nodes + asset-wiring edges; binary or non-Unity content
     // returns an empty result (no file node).
     const extractor = new UnityAssetExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'uxml') {
+    // Custom extractor for Unity UI Toolkit markup. Emits a node per NAMED
+    // element (the ones `Q(name)` can address) plus `<Style src>` imports;
+    // non-UXML content returns an empty result (no file node).
+    const extractor = new UxmlExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'uss') {
+    // Phase 1 indexes the style sheet as a file only, so `<Style src>` has a
+    // resolvable target. Selector-rule extraction is Phase 2.
+    const extractor = new UssExtractor(filePath, source);
     result = extractor.extract();
   } else {
     // Native-kernel route (docs/design/rust-kernel-migration-plan.md): gated
