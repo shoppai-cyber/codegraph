@@ -1,4 +1,5 @@
 import { Node } from '../../types';
+import { logDebug } from '../../errors';
 import { FrameworkResolver, FrameworkExtractionResult, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types';
 
 /**
@@ -71,6 +72,12 @@ const CANDIDATE_LITERAL_RE = /"([A-Za-z_][A-Za-z0-9_-]{1,63})"/g;
  * Cap on distinct candidate literals taken from one C# file. A generated or
  * table-driven file can carry thousands; past this point the file is not the
  * kind of code that queries a UI element by name.
+ *
+ * Tripping this cap is a SILENT MISS — the exact failure mode the inverted
+ * match exists to eliminate, reintroduced at the boundary. It cannot be
+ * eliminated without an unbounded cap, so it must at least be observable:
+ * `logDebug` names the file whenever it fires (`CODEGRAPH_DEBUG=1`). Raising
+ * the cap is not the fix; knowing which file hit it is.
  */
 const MAX_CANDIDATES_PER_FILE = 400;
 
@@ -135,8 +142,13 @@ export const unityUxmlResolver: FrameworkResolver = {
    * emitted before the declared-name set is knowable, so the overwhelming
    * majority resolve to nothing — and unlike a reference, a node persists
    * whether or not it resolved. That trade is node explosion for line
-   * precision, and the budget rule wins. The edge still carries the literal's
-   * line, so the call site is not lost.
+   * precision, and the budget rule wins.
+   *
+   * The edge carries the literal's line, so the call site is not lost *in the
+   * data* — but a file-anchored edge has no symbol node to hang it on, so any
+   * consumer that reports the SOURCE NODE's position shows line 1. `callers`
+   * in the CLI reads the edge's line for file-kind callers precisely because
+   * of this; a new consumer must do the same or it will print `Foo.cs:1`.
    */
   extract(filePath: string, content: string): FrameworkExtractionResult {
     const result: FrameworkExtractionResult = { nodes: [], references: [] };
@@ -168,7 +180,15 @@ export const unityUxmlResolver: FrameworkResolver = {
     while ((match = CANDIDATE_LITERAL_RE.exec(content)) !== null) {
       const literal = match[1]!;
       if (seen.has(literal)) continue;
-      if (seen.size >= MAX_CANDIDATES_PER_FILE) break;
+      if (seen.size >= MAX_CANDIDATES_PER_FILE) {
+        // Say which file went unscanned. Without this the miss is invisible,
+        // and an absent edge reads identically to "this file names no element".
+        logDebug(
+          `unity-uxml: candidate cap reached, stopped scanning ${filePath} — UXML element references past the first ${MAX_CANDIDATES_PER_FILE} distinct string literals in this file are not linked`,
+          { filePath, cap: MAX_CANDIDATES_PER_FILE }
+        );
+        break;
+      }
       seen.add(literal);
       result.references.push({
         fromNodeId: `file:${filePath}`,
