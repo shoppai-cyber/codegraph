@@ -120,6 +120,13 @@ export const LANGUAGES = [
   'vbnet',
   'erlang',
   'terraform',
+  // Unity UI Toolkit markup (.uxml) and style sheets (.uss). No tree-sitter
+  // grammar — parsed by the standalone UxmlExtractor/UssExtractor into named
+  // element nodes + style imports. Own languages rather than riding `xml`, so
+  // `status` and language-filtered queries can tell UI files apart (the
+  // `unity_yaml` precedent).
+  'uxml',
+  'uss',
   'unknown',
 ] as const;
 

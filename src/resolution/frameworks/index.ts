@@ -25,6 +25,7 @@ import { rustResolver } from './rust';
 import { aspnetResolver } from './csharp';
 import { unityResolver } from './unity';
 import { unityAssetResolver } from './unity-assets';
+import { unityUxmlResolver } from './unity-uxml';
 import { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 import { swiftObjcBridgeResolver } from './swift-objc';
 import { reactNativeBridgeResolver } from './react-native';
@@ -68,6 +69,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   unityResolver,
   // Unity scene/prefab/asset YAML wiring (guid→script/prefab/method)
   unityAssetResolver,
+  // Unity UI Toolkit — C# string literal → the UXML element it names
+  unityUxmlResolver,
   // Swift
   swiftUIResolver,
   uikitResolver,
@@ -158,6 +161,7 @@ export { rustResolver } from './rust';
 export { aspnetResolver } from './csharp';
 export { unityResolver } from './unity';
 export { unityAssetResolver } from './unity-assets';
+export { unityUxmlResolver } from './unity-uxml';
 export { swiftUIResolver, uikitResolver, vaporResolver } from './swift';
 export { swiftObjcBridgeResolver } from './swift-objc';
 export { reactNativeBridgeResolver } from './react-native';
