@@ -66,6 +66,24 @@ describe('codegraph affected — test-file detection', () => {
     write(tempDir, 'Assets/Game/Tests/PlayerNetworkDriverTests.cs',
       'public class PlayerNetworkDriverTests { public void Passes() { } }\n');
 
+    // Production sample code, NOT a test. The shared helper's final clause
+    // treats `samples/` as non-production (right for search de-ranking, wrong
+    // for "which tests do I run"), which is why `affected` uses the positive
+    // test signals only.
+    write(tempDir, 'Assets/Game/Samples/Interaction/NetworkedDoor.ts',
+      'export class NetworkedDoor { open(){ return true; } }\n');
+
+    // `tests/integration/` — a genuine test file that ALSO sits under a
+    // non-production dir name. It must survive: the test-dir signal fires
+    // first, exactly as `integrationTest/` does.
+    write(tempDir, 'tests/integration/checkoutFlow.ts',
+      "import { checkout } from '../../packages/app/src/checkout';\ncheckout();\n");
+
+    // CamelCase source-set dir (Gradle/KMP shape), lowercase filename so the
+    // DIRECTORY rule is what's under test, not the filename rule.
+    write(tempDir, 'src/integrationTest/checkoutFlow.ts',
+      'export const scenario = 1;\n');
+
     const cg = CodeGraph.initSync(tempDir);
     await cg.indexAll();
     cg.close();
@@ -88,8 +106,30 @@ describe('codegraph affected — test-file detection', () => {
   });
 
   it('still detects e2e/ directories', () => {
-    expect(affected(tempDir, ['packages/app/src/checkout.ts']))
-      .toEqual(['packages/app/e2e/smoke.ts']);
+    // Both dependents are tests: the e2e/ one (a rule only this command has)
+    // and the tests/integration/ one (a rule the shared helper has).
+    expect(affected(tempDir, ['packages/app/src/checkout.ts']).sort())
+      .toEqual(['packages/app/e2e/smoke.ts', 'tests/integration/checkoutFlow.ts']);
+  });
+
+  it('does NOT classify production sample/example code as a test', () => {
+    // `Assets/Game/Samples/**` is shipped sample code. The shared helper calls
+    // it non-production (for search de-ranking); `affected` must not report it
+    // as test coverage — "NetworkedDoor.ts is a test file" is the same
+    // confidently-wrong answer, in the opposite direction, as the bug above.
+    expect(affected(tempDir, ['Assets/Game/Samples/Interaction/NetworkedDoor.ts']))
+      .toEqual([]);
+  });
+
+  it('keeps genuine test dirs that also carry a non-production dir name', () => {
+    // `tests/integration/` matches the test-DIR rule before anything looks at
+    // "integration", so it stays a test. Same for the CamelCase source-set
+    // shape `integrationTest/`. Dropping either would trade the false positive
+    // above for a false negative, which is strictly worse for `affected`.
+    expect(affected(tempDir, ['tests/integration/checkoutFlow.ts']))
+      .toEqual(['tests/integration/checkoutFlow.ts']);
+    expect(affected(tempDir, ['src/integrationTest/checkoutFlow.ts']))
+      .toEqual(['src/integrationTest/checkoutFlow.ts']);
   });
 
   it('--filter still overrides detection entirely', () => {
