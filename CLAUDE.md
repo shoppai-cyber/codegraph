@@ -341,3 +341,38 @@ publish actions on shared state. Write the files, hand the user the commands.
   Always disambiguate "released," "merged-but-unreleased," and "in-progress" before agreeing that a user-reported problem is unfixed (or that a fix is incomplete). A user saying "your fix only covers X" about a recent PR is usually pointing at the *released* shortcomings — your in-flight branch may already address them but they have no way to know that.
 - **Version-tag every image referenced in `README.md`.** GitHub caches README images (`raw.githubusercontent.com` with a 5-minute TTL; third-party hosts sit behind the long-lived camo proxy), so updating an asset in place can keep showing the stale version. Give each README image URL a `?v=N` query tag and **bump `N` in the same commit whenever the asset bytes change** — e.g. `assets/waitlist.svg?v=2`. The changed URL sidesteps every cache so the new image shows immediately instead of waiting on a TTL to expire.
 
+
+<!-- myriad:begin herdr-lifecycle -->
+## Delegated Work Runs On Herdr (managed by Myriad — do not hand-edit this section)
+
+1. **Delegated workers launch through `herdr-delegation` on a named route.**
+   `bun <harness skill root>/herdr-delegation/delegation.ts launch --contract <absolute task-contract.json>`;
+   `dry-run` previews a launch without side effects. The package is installed at each harness's
+   own skill root: `~/.claude/skills`, `~/.codex/skills`, `~/.config/opencode/skills`. Read its
+   `SKILL.md` before your first launch — do not reason from priors.
+2. **A contract is lifecycle-capable only with an absolute `receiptPath`.** Omitting it preserves
+   park-only behaviour — the worker finishes and its pane stands. Every contract sets it, and
+   points it inside the repository's own `.myriad/` tree with the filename exactly `RECEIPT.json`
+   (`.myriad/tasks/<name>/` for a scaffolded task, `.myriad/panels/<name>/r<n>/<lane>/` for a
+   panel lane). `closeout` finds receipts by scanning one directory for that exact basename, so a
+   receipt written anywhere else is invisible to the only command that inventories them.
+3. **Routes are exact names from the package's `routes.json`** — no inherit, no default, no
+   fallback. A missing route is added or escalated, never guessed.
+4. **Workspace creation passes `--no-focus`** (`herdr workspace create --no-focus`; pane splits
+   use `herdr pane split --no-focus`; there is no `workspace split`). Never focus, interrupt,
+   close, or repurpose a workspace you did not launch.
+5. **A run is finished when its workspace is gone, not when the artifact is harvested.** `launch`
+   reaps an accepted lifecycle-capable run itself; verify with `herdr workspace list`. Three
+   dispositions have a sanctioned next command: `reconcile --receipt` finalizes a `pending_reap`
+   run, `reconcile --receipt --contract` late-accepts a finished `retained_non_success` run, and
+   `dispose` gives up on one. **The rest do not, and that is deliberate** — the `retained_*`
+   family was kept for a reason nobody has acted on yet, and disposing it would destroy the
+   evidence it was kept for, so the operator decides. `closeout --dir` classifies every receipt
+   under a directory and emits the next command only where a sanctioned one exists. Run it to
+   see what is standing; never read a receipt with no suggested command as a receipt that needs
+   nothing.
+6. **Panes do not self-terminate.** Track every workspace you start. Never kill long-running work
+   reflexively; never leave finished work standing.
+7. **Overstory, psmux, and tmux are dead** — never invoked, never delegated through, never named
+   in new artifacts. Reference reading of their source is the only surviving use.
+<!-- myriad:end herdr-lifecycle -->
