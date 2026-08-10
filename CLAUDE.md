@@ -1,8 +1,79 @@
-# CLAUDE.md
+# codegraph — fork instructions (shoppai-cyber)
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+> **`CLAUDE.md` and `AGENTS.md` are byte-identical in this repository. Neither points at the
+> other — each carries the complete instructions.** When you change one, copy it over the other
+> in the same commit and verify with a hash, not by eye.
 
-> **Fork note (shoppai-cyber):** This is Kyle's private fork. For the **active fork workstream + operating rules + delegation**, read **`AGENTS.md`** (repo root) first — it is the canonical router. Everything below remains authoritative for how codegraph itself works (architecture, build/test, the REQUIRED validation methodology, house rules). Current fork-local issue intake is also routed from `AGENTS.md`, including the DAW pending-status report under `scratch/reports/`.
+## What this fork is
+
+Kyle's private fork of `colbymchenry/codegraph`. It exists for the fork-local **framework
+resolvers** — Blender Python and Unity (`src/resolution/frameworks/blender.ts`, `unity.ts`,
+`unity-assets.ts`, `unity-uxml.ts`, plus their invocation tables). Updating from upstream:
+follow **`FORK-MAINTENANCE.md`** (repo root) — check divergence first; **merge, never rebase**;
+never push/PR/tag upstream.
+
+## Fork operating rules (all harnesses)
+
+- **Targeted edits, never full-file rewrites.** Grow existing files by diffs. A true restructure
+  moves the old file aside first, then writes fresh — and says so.
+- **Single-writer git; scoped commits.** `git add <paths>` — **never `git add -A`**. One agent is
+  the sole git actor for this repo at a time.
+- **Fork-only. NEVER push/PR/issue to upstream `colbymchenry/*` or any public repo.**
+  `git push origin` only. Public-repo PRs are forbidden by default unless Kyle initiates that
+  exact request in the same turn.
+- **TDD** — no production code without a failing test first (red→green). `__tests__/blender.test.ts`
+  is the harness pattern to copy for resolver work.
+- **Follow codegraph's OWN required validation methodology** for any new framework: the upstream
+  guide's §"Validation methodology (REQUIRED for every new language/framework)" below, plus
+  `docs/design/dynamic-dispatch-coverage-playbook.md`. A/B eval arms run **Sonnet
+  `--effort high`** (codegraph's deliberate floor-model rule — do not raise it).
+- **Merge/ship is Kyle-gated.** Report the outcome and what you applied; Kyle calls the merge.
+- **`NodeKind`/`EdgeKind` are fixed strings** in `src/types.ts` — extractors and resolvers use
+  them verbatim.
+
+## The non-negotiable design promise (inherited from Blender — do not weaken)
+
+**Emit NOTHING when a target is statically unresolvable.** A *missed* edge is strictly preferred
+to a *fabricated* one — false positives are worse than false negatives. Every ambiguous case
+(computed names, cross-file base chains, dynamic dispatch) emits nothing, never a guess.
+
+**Inherited ceiling (accept, document, don't fight):** per-file `extract()` runs in isolated
+workers and `postExtract`'s `updateNode` is update-by-id (can't insert). So a class whose
+host-invoked-ness depends on a base defined in **another file** (`class B : A` where
+`A : MonoBehaviour` lives elsewhere) can't get its method nodes emitted after the fact — same as
+Blender's work-item-6. Document it as a known limitation.
+
+## Delegation
+
+**Overstory, psmux, and tmux are dead — never invoked, never delegated through.** Delegated
+workers launch on native Herdr through the machine-global `herdr-delegation` package, installed
+at each harness's own skill root (`~/.claude/skills`, `~/.codex/skills`,
+`~/.config/opencode/skills`). Read that package's `SKILL.md` before your first launch — do not
+reason from priors. Keep design/judgment work in-session; fan mechanical volume out to workers.
+
+## Workstream state lives elsewhere — this file carries rules, not state
+
+Current fork workstream, plans, and issue intake are dated documents, not instruction-file
+content. Check `git log` and the plan documents before treating any of them as current — the
+Blender and Unity resolvers named above are already in-tree.
+
+- `C:\dev\repos\unity\databases\unity-docs\UNITY-CORPUS-RESOLVER-PLAN.md` — canonical live plan
+  for the Unity corpus + resolver work; update in place rather than creating new plan files.
+- `C:\dev\vault\projects\AutoResearch\staging\plan-2026-07-05-codegraph-unity-resolver.md` —
+  original tiered plan (historical).
+- `scratch/reports/` — fork-local issue intake (e.g. the DAW pending-status report).
+- `CHANGES.md` — the Blender resolver design rationale.
+- `CODEX-REVIEW-HANDOFF.md` — the two-lens (GLM structural + Codex adversarial) review pattern,
+  **reference only**: the codex-companion broker it mentions is retired; run reviews through
+  current delegation routes instead.
+
+## Upstream dev guide (verbatim below)
+
+Everything from here down is the **upstream project's own dev guide** (`colbymchenry/codegraph`),
+kept verbatim so upstream merges stay reviewable. It is authoritative for how codegraph itself
+works: build/test, architecture, the REQUIRED validation methodology, releases, house rules.
+Sections describing the maintainer's environment (macOS dev machine, Parallels Windows VM,
+release credentials) describe **upstream's** setup, not this machine.
 
 ## Project Overview
 
