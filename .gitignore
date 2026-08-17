@@ -76,6 +76,9 @@ __tests__/zz-scratch*
 
 # linux-arm64 kernel cross-build cache (rust:1-bookworm builder)
 target-linux/
+.kommandr/kommandr.db
+.kommandr/kommandr.db-wal
+.kommandr/kommandr.db-shm
 
 # Fork-local working scratch (not upstream). scratch/ is ignored working space
 # EXCEPT scratch/reports/, which holds tracked CodeGraph issue-intake reports
