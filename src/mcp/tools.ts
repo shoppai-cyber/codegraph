@@ -3119,7 +3119,11 @@ export class ToolHandler {
    * that have no dependents (nothing to warn about), and returns '' when none
    * qualify so a leaf-only exploration stays clean.
    */
-  private buildBlastRadiusSection(cg: CodeGraph, subgraph: Subgraph): string {
+  private buildBlastRadiusSection(
+    cg: CodeGraph,
+    subgraph: Subgraph,
+    pinnedFiles: ReadonlySet<string> = new Set<string>(),
+  ): string {
     const ROOT_CAP = 5; // only the symbols the query actually targeted
     const FILE_CAP = 4; // caller files listed per symbol before "+N more"
     const MEANINGFUL = new Set<string>([
@@ -3127,10 +3131,17 @@ export class ToolHandler {
       'enum', 'type_alias', 'component', 'constant', 'variable', 'property', 'field',
     ]);
     const rel = (p: string) => p.replace(/\\/g, '/');
+    const pinnedFileNorms = new Set(
+      [...pinnedFiles].map((filePath) => rel(filePath).toLowerCase()),
+    );
 
     const roots = subgraph.roots
       .map((id) => subgraph.nodes.get(id))
-      .filter((n): n is Node => !!n && MEANINGFUL.has(n.kind))
+      .filter((n): n is Node =>
+        !!n &&
+        MEANINGFUL.has(n.kind) &&
+        (pinnedFileNorms.size === 0 || pinnedFileNorms.has(rel(n.filePath).toLowerCase()))
+      )
       .slice(0, ROOT_CAP);
     if (roots.length === 0) return '';
 
@@ -4148,7 +4159,7 @@ export class ToolHandler {
     // Blast radius (always-on, compact): for the entry symbols, who depends on
     // them + which tests cover them — locations only, no source — so the agent
     // knows what to update/verify before editing without a separate call.
-    const blastRadius = this.buildBlastRadiusSection(cg, subgraph);
+    const blastRadius = this.buildBlastRadiusSection(cg, subgraph, pinnedSet);
     if (blastRadius) lines.push(blastRadius);
 
     // Relationship map — show how symbols connect

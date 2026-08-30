@@ -27,7 +27,8 @@ describe('codegraph_explore pinned-file flow', () => {
       `def skel_collapse(value):\n    return value\n\n` +
         `def solve(value):\n    return skel_collapse(value)\n\n` +
         `def roof(value):\n    return solve(value)\n\n` +
-        `def skel_cap_emit(value):\n    return value\n`,
+        `def skel_cap_emit(value):\n    return value\n\n` +
+        `def pinned_only(value):\n    return value\n`,
     );
     fs.writeFileSync(
       path.join(testDir, 'rung3b-k1-trace.grove.py'),
@@ -48,6 +49,11 @@ describe('codegraph_explore pinned-file flow', () => {
       path.join(testDir, 'entry.py'),
       `from external import ExternalHelper\n\n` +
         `def current_root(value):\n    return ExternalHelper(value)\n`,
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'consumer.py'),
+      `from rung3b.grove import pinned_only\n\n` +
+        `def pinned_consumer(value):\n    return pinned_only(value)\n`,
     );
     fs.writeFileSync(
       path.join(testDir, 'external.py'),
@@ -131,6 +137,23 @@ describe('codegraph_explore pinned-file flow', () => {
     expect(source).toContain('**`rung3b.grove.py`**');
     expect(source).not.toContain('**`rung3b-k1-trace.grove.py`**');
     expect(source).not.toContain('**`rung3b_eavez_decoupled.grove.py`**');
+  });
+
+  it('keeps exact-file blast radius free of snapshot symbols but retains connected callers', async () => {
+    const result = await handler.execute('codegraph_explore', {
+      query:
+        'In exact file rung3b.grove.py trace solve, skel_cap_emit, and pinned_only and show ' +
+        'the caller inventory. Do not substitute any same-named group from another file.',
+      maxFiles: 4,
+    });
+    const text = result.content?.[0]?.text ?? '';
+    const blast = (
+      text.split('**Blast radius — what depends on these (update/verify before editing)**')[1] ?? ''
+    ).split('**Source Code**')[0] ?? '';
+
+    expect(blast).toContain('`consumer.py`');
+    expect(blast).not.toContain('rung3b-k1-trace.grove.py');
+    expect(blast).not.toContain('rung3b_eavez_decoupled.grove.py');
   });
 
   it('does not select an unrelated precise off-file flow under an exact pin', async () => {
