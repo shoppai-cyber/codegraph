@@ -2607,6 +2607,7 @@ export class ToolHandler {
         [...pinnedFiles].map((filePath) => filePath.replace(/\\/g, '/').toLowerCase())
       );
       for (const t of tokens) {
+        const precise = isPreciseToken(t);
         const directLookupName = t.split(/::|\./).filter(Boolean).at(-1) ?? t;
         const directPinnedHits = pinnedFileNorms.size > 0
           ? cg.getNodesByName(directLookupName).filter(
@@ -2618,9 +2619,14 @@ export class ToolHandler {
         // Symbol search is intentionally capped. A file path already pinned by
         // v1.6's path resolver must also pin the named-symbol flow, or a later
         // duplicate definition can still be absent from the candidate pool.
+        // With a pin, ordinary prose tokens that miss in the pinned file are
+        // not allowed to seed an off-file flow. Shape-precise symbol spellings
+        // may still name a real cross-file dependency explicitly.
         const hits = directPinnedHits.length > 0
           ? directPinnedHits
-          : this.findAllSymbols(cg, t).nodes;
+          : pinnedFileNorms.size === 0 || precise
+            ? this.findAllSymbols(cg, t).nodes
+            : [];
         const allCands = hits.filter((n) => CALLABLE.has(n.kind));
         const pinnedCands = pinnedFileNorms.size > 0
           ? allCands.filter((node) =>
@@ -2641,7 +2647,6 @@ export class ToolHandler {
             });
         const kept = pick.slice(0, 6);
         tokenNodes.set(t, kept.map((n) => n.id));
-        const precise = isPreciseToken(t);
         for (const n of kept) {
           named.set(n.id, n);
           if (specific) uniqueNamedNodeIds.add(n.id);

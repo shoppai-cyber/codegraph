@@ -22,6 +22,28 @@ describe('codegraph_explore pinned-file flow', () => {
           `def shared_root(value):\n    return shared_middle(value)\n`,
       );
     }
+    fs.writeFileSync(
+      path.join(testDir, 'rung3b.grove.py'),
+      `def skel_collapse(value):\n    return value\n\n` +
+        `def solve(value):\n    return skel_collapse(value)\n\n` +
+        `def roof(value):\n    return solve(value)\n`,
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'rung3b-k1-trace.grove.py'),
+      `def zone(value):\n    return value\n\n` +
+        `def flow(value):\n    return zone(value)\n\n` +
+        `def show(value):\n    return flow(value)\n`,
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'entry.py'),
+      `from external import ExternalHelper\n\n` +
+        `def current_root(value):\n    return ExternalHelper(value)\n`,
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'external.py'),
+      `def finalize_result(value):\n    return value\n\n` +
+        `def ExternalHelper(value):\n    return finalize_result(value)\n`,
+    );
     cg = CodeGraph.initSync(testDir);
     await cg.indexAll();
     handler = new ToolHandler(cg);
@@ -51,5 +73,37 @@ describe('codegraph_explore pinned-file flow', () => {
     expect(flow).toContain(`calls @${exactPath}:5`);
     expect(flow).toContain(`shared_leaf (${exactPath}:1)`);
     expect(flow).not.toContain('snapshot_00.py');
+  });
+
+  it('confines natural-language flow selection to an explicitly pinned file', async () => {
+    const exactPath = 'rung3b.grove.py';
+    const result = await handler.execute('codegraph_explore', {
+      query:
+        `In ${exactPath} show the exact roof to solve to skel_collapse dependency ` +
+        'and tuple flow, including zone ownership. Do not substitute a same-named group from another file.',
+      maxFiles: 6,
+    });
+    const text = result.content?.[0]?.text ?? '';
+    const flow = text.split('> Full source for these symbols is below')[0] ?? '';
+
+    expect(flow).toContain(`roof (${exactPath}:7)`);
+    expect(flow).toContain(`calls @${exactPath}:8`);
+    expect(flow).toContain(`solve (${exactPath}:4)`);
+    expect(flow).toContain(`calls @${exactPath}:5`);
+    expect(flow).toContain(`skel_collapse (${exactPath}:1)`);
+    expect(flow).not.toContain('rung3b-k1-trace.grove.py');
+  });
+
+  it('keeps explicitly named precise cross-file dependencies available', async () => {
+    const result = await handler.execute('codegraph_explore', {
+      query: 'In entry.py show current_root ExternalHelper finalize_result',
+      maxFiles: 4,
+    });
+    const text = result.content?.[0]?.text ?? '';
+    const flow = text.split('> Full source for these symbols is below')[0] ?? '';
+
+    expect(flow).toContain('current_root (entry.py:3)');
+    expect(flow).toContain('ExternalHelper (external.py:4)');
+    expect(flow).toContain('finalize_result (external.py:1)');
   });
 });
