@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { CodeGraph } from '../src';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars';
+import { ToolHandler } from '../src/mcp/tools';
 
 beforeAll(async () => {
   await initGrammars();
@@ -788,6 +789,7 @@ describe('JVM FQN imports — end-to-end', () => {
 
     const edge = cg.getIncomingEdges(util!.id).find((e) => e.kind === 'imports');
     expect(edge, 'imports edge should reach the top-level function by FQN').toBeDefined();
+    cg.close();
   });
 
   it('resolves cross-language: Kotlin importing a Java class', async () => {
@@ -809,6 +811,7 @@ describe('JVM FQN imports — end-to-end', () => {
 
     const edge = cg.getIncomingEdges(javaBar!.id).find((e) => e.kind === 'imports');
     expect(edge, 'Kotlin caller should resolve its import to the Java class').toBeDefined();
+    cg.close();
   });
 
   it('disambiguates a class-name collision across packages', async () => {
@@ -854,6 +857,7 @@ describe('JVM FQN imports — end-to-end', () => {
       edges.map((e) => cg.getNode(e.source)?.filePath).filter(Boolean);
     expect(sourceFiles(alphaIncoming).some((p) => p?.includes('CallerA.kt'))).toBe(true);
     expect(sourceFiles(betaIncoming).some((p) => p?.includes('CallerB.kt'))).toBe(true);
+    cg.close();
   });
 });
 
@@ -1331,6 +1335,142 @@ describe('Terraform follow-ups: remote-state bridge, provider alias, moved block
         cg.getOutgoingEdges(rootFile!.id).find((e) => e.target === renamed!.id),
         'moved block → live resource edge'
       ).toBeDefined();
+    } finally {
+      cg.close();
+    }
+  });
+});
+
+describe('Grove end-to-end — duplicate snapshots remain file-local', () => {
+  let tmpDir: string | undefined;
+  afterEach(() => {
+    if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+    tmpDir = undefined;
+  });
+
+  it('resolves calls, zone ownership, and decorated functions within each exact file', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-grove-'));
+    fs.mkdirSync(path.join(tmpDir, 'graphs'));
+    const source = `from src.grove import node_tree, repeat_zone
+
+@node_tree(id="clean.helper.v1", target="geometry")
+def helper(geometry: Geometry) -> Geometry:
+    return geometry
+
+@node_tree(id="clean.root.v1", target="geometry")
+def root(geometry: Geometry, steps: Integer) -> Geometry:
+    @repeat_zone(iterations=steps)
+    def solve(geometry: Geometry) -> Geometry:
+        return helper(geometry)
+    return solve(geometry)
+`;
+    const files = ['graphs/current.grove.py', 'graphs/archive.grove.py'];
+    for (const file of files) fs.writeFileSync(path.join(tmpDir, file), source);
+
+    const cg = CodeGraph.initSync(tmpDir);
+    await cg.indexAll();
+    try {
+      expect(cg.getDetectedFrameworks()).toContain('grove');
+
+      for (const file of files) {
+        const nodes = cg.getNodesInFile(file);
+        const root = nodes.find(
+          (node) => node.qualifiedName === `${file}::grove:clean.root.v1`
+        );
+        const helper = nodes.find(
+          (node) => node.qualifiedName === `${file}::grove:clean.helper.v1`
+        );
+        const zone = nodes.find(
+          (node) =>
+            node.qualifiedName ===
+            `${file}::grove:clean.root.v1::zone:repeat:solve`
+        );
+        const rootFunction = nodes.find(
+          (node) => node.kind === 'function' && node.qualifiedName === 'root'
+        );
+        const helperFunction = nodes.find(
+          (node) => node.kind === 'function' && node.qualifiedName === 'helper'
+        );
+        const zoneFunction = nodes.find(
+          (node) => node.kind === 'function' && node.qualifiedName === 'root::solve'
+        );
+        expect(root).toBeDefined();
+        expect(helper).toBeDefined();
+        expect(zone).toBeDefined();
+        expect(rootFunction).toBeDefined();
+        expect(helperFunction).toBeDefined();
+        expect(zoneFunction).toBeDefined();
+
+        const expected = [
+          { source: root!, target: helper!, kind: 'calls' },
+          { source: root!, target: zone!, kind: 'contains' },
+          { source: root!, target: rootFunction!, kind: 'decorates' },
+          { source: helper!, target: helperFunction!, kind: 'decorates' },
+          { source: zone!, target: zoneFunction!, kind: 'decorates' },
+        ];
+        for (const item of expected) {
+          const edge = cg
+            .getOutgoingEdges(item.source.id)
+            .find((candidate) => candidate.target === item.target.id && candidate.kind === item.kind);
+          expect(edge, `${file}: ${item.kind} -> ${item.target.qualifiedName}`).toBeDefined();
+          expect(edge?.metadata?.resolvedBy).toBe('framework');
+          expect(item.target.filePath).toBe(file);
+        }
+
+        const sibling = files.find((candidate) => candidate !== file)!;
+        const siblingNodeIds = new Set(cg.getNodesInFile(sibling).map((node) => node.id));
+        const groveComponents = [root!, helper!, zone!];
+        expect(
+          groveComponents
+            .flatMap((component) => cg.getOutgoingEdges(component.id))
+            .some((edge) => siblingNodeIds.has(edge.target))
+        ).toBe(false);
+      }
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('keeps the rendered call flow in the exact Grove file named by the query', async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-grove-explore-'));
+    const source = `from src.grove import node_tree
+
+@node_tree(id="clean.helper.v1", target="geometry")
+def helper(geometry: Geometry) -> Geometry:
+    return geometry
+
+@node_tree(id="clean.solve.v1", target="geometry")
+def solve(geometry: Geometry) -> Geometry:
+    return helper(geometry)
+
+@node_tree(id="clean.root.v1", target="geometry")
+def root(geometry: Geometry) -> Geometry:
+    return solve(geometry)
+`;
+    const current = 'snapshots/current/graph.grove.py';
+    const archive = 'snapshots/archive/graph.grove.py';
+    for (const file of [current, archive]) {
+      fs.mkdirSync(path.dirname(path.join(tmpDir, file)), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, file), source);
+    }
+
+    const cg = CodeGraph.initSync(tmpDir);
+    await cg.indexAll();
+    try {
+      const handler = new ToolHandler(cg);
+      const result = await handler.execute('codegraph_explore', {
+        query: `${current} root solve helper Grove dependency flow`,
+        maxFiles: 4,
+      });
+      const text = result.content[0]?.text ?? '';
+      const flow = text.split('> Full source for these symbols is below')[0] ?? '';
+
+      expect(flow).toContain(`root (${current}:12)`);
+      expect(flow).toContain(`solve (${current}:8)`);
+      expect(flow).toContain(`helper (${current}:4)`);
+      expect(flow).toContain(`↓ calls @${current}:13`);
+      expect(flow).toContain(`↓ calls @${current}:9`);
+      expect(flow).not.toContain(archive);
     } finally {
       cg.close();
     }

@@ -2546,7 +2546,7 @@ export class ToolHandler {
    * whose qualifiedName contains another named token (`PmsProductServiceImpl::list`),
    * dropping unrelated `OmsOrderService::list`.
    */
-  private buildFlowFromNamedSymbols(cg: CodeGraph, query: string): { text: string; pathNodeIds: Set<string>; namedNodeIds: Set<string>; uniqueNamedNodeIds: Set<string>; spineCallSites: Map<string, number> } {
+  private buildFlowFromNamedSymbols(cg: CodeGraph, query: string, pinnedFiles: ReadonlySet<string> = new Set()): { text: string; pathNodeIds: Set<string>; namedNodeIds: Set<string>; uniqueNamedNodeIds: Set<string>; spineCallSites: Map<string, number> } {
     // spineCallSites: for each spine node, the line where it CALLS the next hop —
     // lets the source assembler window an oversize spine method (e.g. n8n's 962-line
     // processRunExecutionData) to the call site instead of dumping the whole body.
@@ -2603,9 +2603,31 @@ export class ToolHandler {
       const preciseNamedIds = new Set<string>();
       const hasHeuristicEdge = (id: string): boolean =>
         [...cg.getCallers(id), ...cg.getCallees(id)].some(({ edge }) => edge.provenance === 'heuristic');
+      const pinnedFileNorms = new Set(
+        [...pinnedFiles].map((filePath) => filePath.replace(/\\/g, '/').toLowerCase())
+      );
       for (const t of tokens) {
-        const hits = this.findAllSymbols(cg, t).nodes;
-        const cands = hits.filter((n) => CALLABLE.has(n.kind));
+        const directLookupName = t.split(/::|\./).filter(Boolean).at(-1) ?? t;
+        const directPinnedHits = pinnedFileNorms.size > 0
+          ? cg.getNodesByName(directLookupName).filter(
+              (node) =>
+                pinnedFileNorms.has(node.filePath.replace(/\\/g, '/').toLowerCase()) &&
+                this.matchesSymbol(node, t)
+            )
+          : [];
+        // Symbol search is intentionally capped. A file path already pinned by
+        // v1.6's path resolver must also pin the named-symbol flow, or a later
+        // duplicate definition can still be absent from the candidate pool.
+        const hits = directPinnedHits.length > 0
+          ? directPinnedHits
+          : this.findAllSymbols(cg, t).nodes;
+        const allCands = hits.filter((n) => CALLABLE.has(n.kind));
+        const pinnedCands = pinnedFileNorms.size > 0
+          ? allCands.filter((node) =>
+              pinnedFileNorms.has(node.filePath.replace(/\\/g, '/').toLowerCase())
+            )
+          : [];
+        const cands = pinnedCands.length > 0 ? pinnedCands : allCands;
         tokenFamily.set(t, cands);
         // A qualified or otherwise-specific name (<=3 hits) keeps all; an
         // ambiguous simple name keeps only candidates whose container is named.
@@ -2826,7 +2848,15 @@ export class ToolHandler {
         out.push('**Flow (call path among the symbols you queried)**', '');
         for (let i = 0; i < best!.length; i++) {
           const step = best![i]!;
-          if (step.edge) { const sy = this.synthEdgeNote(step.edge); out.push(`   ↓ ${sy ? sy.compact : step.edge.kind}`); }
+          if (step.edge) {
+            const sy = this.synthEdgeNote(step.edge);
+            const source = i > 0 ? best![i - 1]!.node : null;
+            const edgeLine = step.edge.line;
+            const callSite = !sy && source && typeof edgeLine === 'number' && edgeLine > 0
+              ? ` @${source.filePath}:${edgeLine}`
+              : '';
+            out.push(`   ↓ ${sy ? sy.compact : `${step.edge.kind}${callSite}`}`);
+          }
           out.push(`${i + 1}. ${step.node.name} (${step.node.filePath}:${step.node.startLine})`);
         }
         out.push('');
@@ -4132,7 +4162,7 @@ export class ToolHandler {
     // Compute the flow spine once — used both to prepend the Flow section (below)
     // and to gate adaptive source sizing: files on the spine get full source,
     // off-spine peers skeletonize.
-    const flow = this.buildFlowFromNamedSymbols(cg, matchQuery);
+    const flow = this.buildFlowFromNamedSymbols(cg, matchQuery, pinnedSet);
 
     // Snapshot every ranked candidate's scoring inputs, in final sort order, so
     // the diagnostic can show what each file's share of the envelope was BOUGHT

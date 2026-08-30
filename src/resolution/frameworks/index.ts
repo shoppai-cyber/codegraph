@@ -16,6 +16,7 @@ import { vueResolver } from './vue';
 import { astroResolver } from './astro';
 import { djangoResolver, flaskResolver, fastapiResolver } from './python';
 import { blenderResolver } from './blender';
+import { groveResolver } from './grove';
 import { railsResolver } from './ruby';
 import { springResolver } from './java';
 import { playResolver } from './play';
@@ -54,6 +55,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   fastapiResolver,
   // Blender add-ons — host-invoked registration/callback surfaces
   blenderResolver,
+  // Grove — restricted-Python node-group identities and dependencies
+  groveResolver,
   // Ruby
   railsResolver,
   // Java
@@ -152,6 +155,7 @@ export { vueResolver } from './vue';
 export { astroResolver } from './astro';
 export { djangoResolver, flaskResolver, fastapiResolver } from './python';
 export { blenderResolver } from './blender';
+export { groveResolver } from './grove';
 export { railsResolver } from './ruby';
 export { springResolver } from './java';
 export { playResolver } from './play';
