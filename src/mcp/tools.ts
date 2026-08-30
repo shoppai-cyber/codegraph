@@ -2773,6 +2773,18 @@ export class ToolHandler {
         chain.reverse();
         if (!best || chain.length > best.length) best = chain;
       }
+      // A path-qualified query may traverse into a real cross-file dependency,
+      // but it may not select an unrelated off-file chain merely because prose
+      // tokens happened to resemble precise symbol names there.
+      if (
+        pinnedFileNorms.size > 0 &&
+        best &&
+        !best.some(({ node }) =>
+          pinnedFileNorms.has(node.filePath.replace(/\\/g, '/').toLowerCase())
+        )
+      ) {
+        best = null;
+      }
       const hasMain = !!best && best.length >= 3;
       const pathIds = new Set((best ?? []).map((s) => s.node.id));
       // Where each spine node calls the NEXT hop (best[i+1].edge is the edge from
@@ -3510,6 +3522,11 @@ export class ToolHandler {
       const typeTokens = tokens.filter(
         (o) => /^[A-Z][A-Za-z0-9]{3,}/.test(o) && !projectNameTokens.has(normalizeNameToken(o)),
       );
+      const pinnedFileNorms = new Set(
+        [...pinnedSet].map((filePath) => filePath.replace(/\\/g, '/').toLowerCase()),
+      );
+      const isInPinnedFile = (node: Node) =>
+        pinnedFileNorms.has(node.filePath.replace(/\\/g, '/').toLowerCase());
       const inNamedContext = (n: Node) =>
         typeTokens.some((ct) => {
           const lc = ct.toLowerCase();
@@ -3571,6 +3588,12 @@ export class ToolHandler {
         let cands = raw
           .filter((n) => SEEDABLE.has(n.kind) && !isTestPath(n.filePath))
           .sort((a, b) => (bodyLines(b) > 1 ? 1 : 0) - (bodyLines(a) > 1 ? 1 : 0) || bodyLines(b) - bodyLines(a));
+        // An exact file path is also a hard disambiguator for source allocation:
+        // when that file defines a named symbol, sibling snapshots' same-named
+        // definitions must not earn the named-source tier. Precise symbols that
+        // are absent from every pin can still name real cross-file dependencies.
+        const pinnedCands = cands.filter(isInPinnedFile);
+        if (pinnedCands.length > 0) cands = pinnedCands;
         // Field-name seeding fallback (#1196): a camelCase token that names NO
         // definition of its own is usually an object-literal key / API field
         // (`profileInfo`) — no node exists, so it contributed zero seeds and
@@ -4053,7 +4076,7 @@ export class ToolHandler {
       (fileTermHits.get(fp) ?? 0) >= 2 &&
       (entryFiles.has(fp) || centralFiles.has(fp));
 
-    const sortedFiles = relevantFiles.sort((a, b) => {
+    let sortedFiles = relevantFiles.sort((a, b) => {
       const aPath = a[0].toLowerCase();
       const bPath = b[0].toLowerCase();
 
@@ -4168,6 +4191,24 @@ export class ToolHandler {
     // and to gate adaptive source sizing: files on the spine get full source,
     // off-spine peers skeletonize.
     const flow = this.buildFlowFromNamedSymbols(cg, matchQuery, pinnedSet);
+
+    // Exact-file exploration renders the pin plus files on a call path anchored
+    // to that pin. Globally ranked sibling snapshots are still eligible for the
+    // separate blast-radius/pointer inventory, but cannot supply source bodies
+    // while the response claims the named file is pinned.
+    if (pinnedSet.size > 0) {
+      const anchoredFlowFiles = new Set<string>();
+      let touchesPin = false;
+      for (const id of flow.pathNodeIds) {
+        const node = cg.getNode(id);
+        if (!node) continue;
+        anchoredFlowFiles.add(node.filePath);
+        if (pinnedSet.has(node.filePath)) touchesPin = true;
+      }
+      sortedFiles = sortedFiles.filter(([filePath]) =>
+        pinnedSet.has(filePath) || (touchesPin && anchoredFlowFiles.has(filePath))
+      );
+    }
 
     // Snapshot every ranked candidate's scoring inputs, in final sort order, so
     // the diagnostic can show what each file's share of the envelope was BOUGHT

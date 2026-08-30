@@ -26,13 +26,23 @@ describe('codegraph_explore pinned-file flow', () => {
       path.join(testDir, 'rung3b.grove.py'),
       `def skel_collapse(value):\n    return value\n\n` +
         `def solve(value):\n    return skel_collapse(value)\n\n` +
-        `def roof(value):\n    return solve(value)\n`,
+        `def roof(value):\n    return solve(value)\n\n` +
+        `def skel_cap_emit(value):\n    return value\n`,
     );
     fs.writeFileSync(
       path.join(testDir, 'rung3b-k1-trace.grove.py'),
       `def zone(value):\n    return value\n\n` +
         `def flow(value):\n    return zone(value)\n\n` +
-        `def show(value):\n    return flow(value)\n`,
+        `def show(value):\n    return flow(value)\n\n` +
+        `def solve(value):\n    return value\n\n` +
+        `def roof(value):\n    return solve(value)\n\n` +
+        `def skel_cap_emit(value):\n    return value\n`,
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'rung3b_eavez_decoupled.grove.py'),
+      `def solve(value):\n    return value\n\n` +
+        `def roof(value):\n    return solve(value)\n\n` +
+        `def skel_cap_emit(value):\n    return value\n`,
     );
     fs.writeFileSync(
       path.join(testDir, 'entry.py'),
@@ -105,5 +115,33 @@ describe('codegraph_explore pinned-file flow', () => {
     expect(flow).toContain('current_root (entry.py:3)');
     expect(flow).toContain('ExternalHelper (external.py:4)');
     expect(flow).toContain('finalize_result (external.py:1)');
+  });
+
+  it('does not render same-named snapshot sources when an exact file is pinned', async () => {
+    const result = await handler.execute('codegraph_explore', {
+      query:
+        'In exact file rung3b.grove.py trace the current public FlatTop and MaxRise inputs ' +
+        'through roof and solve to stop-time selection and skel_cap_emit. Show the owning ' +
+        'Repeat Zone and tuple bindings. Do not substitute any same-named group from another file.',
+      maxFiles: 4,
+    });
+    const text = result.content?.[0]?.text ?? '';
+    const source = text.split('**Source Code**')[1] ?? '';
+
+    expect(source).toContain('**`rung3b.grove.py`**');
+    expect(source).not.toContain('**`rung3b-k1-trace.grove.py`**');
+    expect(source).not.toContain('**`rung3b_eavez_decoupled.grove.py`**');
+  });
+
+  it('does not select an unrelated precise off-file flow under an exact pin', async () => {
+    const result = await handler.execute('codegraph_explore', {
+      query: 'In rung3b.grove.py Show Flow Zone',
+      maxFiles: 4,
+    });
+    const text = result.content?.[0]?.text ?? '';
+
+    expect(text).not.toContain('1. show (rung3b-k1-trace.grove.py:7)');
+    expect(text).not.toContain('2. flow (rung3b-k1-trace.grove.py:4)');
+    expect(text).not.toContain('3. zone (rung3b-k1-trace.grove.py:1)');
   });
 });
