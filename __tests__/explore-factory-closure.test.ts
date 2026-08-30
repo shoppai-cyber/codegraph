@@ -80,7 +80,7 @@ describe('CG-27 — a factory-closure file delivers the closures inside it', () 
     sourceLines = fs.readFileSync(path.join(testDir, TARGET), 'utf-8').split('\n');
     delivered = new Set();
     for (const line of response.split('\n')) {
-      const m = /^(\d+)\t(.*)$/.exec(line);
+      const m = /^(\d+)\t([^\n]*)$/.exec(line);
       if (!m) continue;
       const n = Number(m[1]);
       if (n >= 1 && n <= sourceLines.length && sourceLines[n - 1] === m[2]) delivered.add(n);

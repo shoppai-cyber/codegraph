@@ -160,7 +160,7 @@ describe('CG-30 — an oversize cluster member is bounded, not unbounded', () =>
       const source = fs.readFileSync(path.join(testDir, GIANT), 'utf-8').split('\n');
       const numbered = response
         .split('\n')
-        .map((l) => /^(\d+)\t(.*)$/.exec(l))
+        .map((l) => /^(\d+)\t([^\n]*)$/.exec(l))
         .filter((m): m is RegExpExecArray => m !== null)
         .filter((m) => Number(m[1]) >= 1 && Number(m[1]) <= source.length);
       const matching = numbered.filter((m) => source[Number(m[1]) - 1] === m[2]);
