@@ -598,6 +598,39 @@ def interface_metadata(geometry: Geometry, scale: Float = 1.0) -> Geometry:
     ]);
   });
 
+  it('extracts ingested groups with literal interface ordering and owned zones', () => {
+    const filePath = 'graphs/emitted.grove.py';
+    const result = groveResolver.extract?.(
+      filePath,
+      `from grove import node_tree, repeat_zone
+
+@node_tree(
+    id="clean.ingested.v1",
+    target="geometry",
+    interface_order=[("in", "geometry"), ("out", "return")],
+    interface_layout=[("out", "return"), ("in", "geometry")],
+)
+def ingested(geometry: Geometry, steps: Integer = 1) -> Geometry:
+    @repeat_zone(iterations=steps)
+    def repeat_input_zone(state: Geometry, index: Integer) -> Geometry:
+        return state
+    return repeat_input_zone(geometry)
+`
+    );
+
+    expect(result?.nodes.map(({ name, qualifiedName }) => ({ name, qualifiedName }))).toEqual([
+      {
+        name: 'clean.ingested.v1',
+        qualifiedName: `${filePath}::grove:clean.ingested.v1`,
+      },
+      {
+        name: 'repeat_input_zone',
+        qualifiedName:
+          `${filePath}::grove:clean.ingested.v1::zone:repeat:repeat_input_zone`,
+      },
+    ]);
+  });
+
   it('rejects computed panels and labels metadata', () => {
     const result = groveResolver.extract?.(
       'graphs/computed-interface-metadata.grove.py',
