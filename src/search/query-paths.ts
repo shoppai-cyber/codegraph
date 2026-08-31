@@ -211,7 +211,7 @@ export function extractQueryPaths(
     pinnedFiles: [],
     unresolvedPathSpans: [],
   };
-  if (!query.trim() || indexedPaths.length === 0) return passthrough;
+  if (!query.trim()) return passthrough;
 
   // Lowercase view of the index, built once per call. Last writer wins on a
   // case-colliding pair, which is the existing file-view behavior too.

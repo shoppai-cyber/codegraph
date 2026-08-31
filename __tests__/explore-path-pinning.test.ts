@@ -116,6 +116,29 @@ describe('path pinning (fix 1)', () => {
     expect(out).not.toContain('**Source Code**');
   });
 
+  it('fails closed for exact missing files when the index contains zero files', async () => {
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-empty-path-pin-'));
+    const emptyCg = CodeGraph.initSync(emptyDir);
+    try {
+      await emptyCg.indexAll();
+      const result = await new ToolHandler(emptyCg).execute('codegraph_explore', {
+        query: String.raw`In exact files test_missing_helper.py and C:\repo\tests\probe_missing.py show fixtures`,
+      });
+      const out = result.content?.[0]?.text ?? '';
+
+      expect(out).toContain('No indexed file uniquely matches');
+      expect(out).toContain('test_missing_helper.py');
+      expect(out).toContain('C:/repo/tests/probe_missing.py');
+      expect(out).not.toContain('**Flow**');
+      expect(out).not.toContain('**Dataflow**');
+      expect(out).not.toContain('**Blast radius');
+      expect(out).not.toContain('**Source Code**');
+    } finally {
+      emptyCg.destroy();
+      fs.rmSync(emptyDir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps a present exact file and identifies a missing source basename', async () => {
     const out = await explore(
       `In the exact current files ${TARGET} and test_missing_helper.py show feedAtBottom and handleFeedScroll`,

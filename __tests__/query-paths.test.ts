@@ -136,6 +136,19 @@ describe('extractQueryPaths — resolution and stripping', () => {
     expect(out.strippedQuery).toBe('In the exact current files and show fixtures');
   });
 
+  it('reports unavailable source basenames and Windows paths with zero indexed files', () => {
+    const out = extractQueryPaths(
+      String.raw`In exact files test_missing_helper.py and C:\repo\tests\probe_missing.py show fixtures`,
+      [],
+    );
+    expect(out.pinnedFiles).toEqual([]);
+    expect(out.unresolvedPathSpans).toEqual([
+      'test_missing_helper.py',
+      'C:/repo/tests/probe_missing.py',
+    ]);
+    expect(out.strippedQuery).toBe('In exact files and show fixtures');
+  });
+
   it('retains a present exact file while reporting a missing basename', () => {
     const out = extractQueryPaths(
       'In src/lib/chat-manager.ts and test_missing_helper.py show chatManager',
