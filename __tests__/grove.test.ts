@@ -631,6 +631,46 @@ def ingested(geometry: Geometry, steps: Integer = 1) -> Geometry:
     ]);
   });
 
+  it('rejects computed or malformed interface ordering metadata', () => {
+    const result = groveResolver.extract?.(
+      'graphs/invalid-interface-ordering.grove.py',
+      `from grove import node_tree
+
+ORDER = [("in", "geometry"), ("out", "return")]
+SOCKET = "geometry"
+
+@node_tree(
+    id="clean.computed-order.v1",
+    target="geometry",
+    interface_order=ORDER,
+    interface_layout=[("out", "return"), ("in", "geometry")],
+)
+def computed_order(geometry: Geometry) -> Geometry:
+    return geometry
+
+@node_tree(
+    id="clean.computed-entry.v1",
+    target="geometry",
+    interface_order=[("in", SOCKET), ("out", "return")],
+    interface_layout=[("out", "return"), ("in", "geometry")],
+)
+def computed_entry(geometry: Geometry) -> Geometry:
+    return geometry
+
+@node_tree(
+    id="clean.malformed-entry.v1",
+    target="geometry",
+    interface_order=[("in", "geometry", "extra"), ("out", "return")],
+    interface_layout=[("out", "return"), ("in", "geometry")],
+)
+def malformed_entry(geometry: Geometry) -> Geometry:
+    return geometry
+`
+    );
+
+    expect(result?.nodes).toEqual([]);
+  });
+
   it('rejects computed panels and labels metadata', () => {
     const result = groveResolver.extract?.(
       'graphs/computed-interface-metadata.grove.py',

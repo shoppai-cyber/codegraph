@@ -220,6 +220,16 @@ function literalPanelsValue(node: SyntaxNode | null): boolean {
   );
 }
 
+function literalStringPairSequenceValue(node: SyntaxNode | null): boolean {
+  if (!node || (node.type !== 'list' && node.type !== 'tuple')) return false;
+  return node.namedChildren.every(
+    (item) =>
+      (item.type === 'list' || item.type === 'tuple') &&
+      item.namedChildren.length === 2 &&
+      item.namedChildren.every((value) => plainStringValue(value) !== null)
+  );
+}
+
 type GroveZoneKind = 'repeat' | 'simulation' | 'foreach';
 
 interface GroveBindings {
@@ -293,7 +303,8 @@ function groveDecoratorId(
   let host: string | null = null;
   const seenNames = new Set<string>();
   const allowedNames = new Set([
-    'description', 'host', 'id', 'labels', 'name', 'panels', 'target',
+    'description', 'host', 'id', 'interface_layout', 'interface_order', 'labels',
+    'name', 'panels', 'target',
   ]);
   for (const argument of argumentsNode.namedChildren) {
     if (argument.type !== 'keyword_argument') return null;
@@ -308,6 +319,10 @@ function groveDecoratorId(
     }
     if (keyword === 'panels') {
       if (!literalPanelsValue(value)) return null;
+      continue;
+    }
+    if (keyword === 'interface_order' || keyword === 'interface_layout') {
+      if (!literalStringPairSequenceValue(value)) return null;
       continue;
     }
     const literal = plainStringValue(value);
