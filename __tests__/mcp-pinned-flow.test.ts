@@ -117,10 +117,15 @@ describe('codegraph_explore pinned-file flow', () => {
     });
     const text = result.content?.[0]?.text ?? '';
     const flow = text.split('> Full source for these symbols is below')[0] ?? '';
+    const blast = (
+      text.split('**Blast radius — what depends on these (update/verify before editing)**')[1] ?? ''
+    ).split('**Source Code**')[0] ?? '';
 
     expect(flow).toContain('current_root (entry.py:3)');
     expect(flow).toContain('ExternalHelper (external.py:4)');
     expect(flow).toContain('finalize_result (external.py:1)');
+    expect(blast).toContain('`ExternalHelper` (external.py:4)');
+    expect(blast).toContain('`finalize_result` (external.py:1)');
   });
 
   it('does not render same-named snapshot sources when an exact file is pinned', async () => {

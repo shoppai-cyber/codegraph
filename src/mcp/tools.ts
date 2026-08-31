@@ -3135,12 +3135,50 @@ export class ToolHandler {
       [...pinnedFiles].map((filePath) => rel(filePath).toLowerCase()),
     );
 
+    // A file pin constrains candidate edit roots, not connected dependencies.
+    // Keep roots in the pinned file plus off-file roots reachable by a directed
+    // dependency or dependent path from any pinned-file node. Walking each
+    // direction separately avoids an undirected walk joining siblings that only
+    // happen to share a callee.
+    let eligibleRootIds: Set<string> | null = null;
+    if (pinnedFileNorms.size > 0) {
+      const anchors = [...subgraph.nodes.values()]
+        .filter((n) => pinnedFileNorms.has(rel(n.filePath).toLowerCase()))
+        .map((n) => n.id);
+      const forward = new Map<string, string[]>();
+      const reverse = new Map<string, string[]>();
+      for (const edge of subgraph.edges) {
+        if (edge.kind === 'contains') continue;
+        if (!subgraph.nodes.has(edge.source) || !subgraph.nodes.has(edge.target)) continue;
+        const outgoing = forward.get(edge.source) ?? [];
+        outgoing.push(edge.target);
+        forward.set(edge.source, outgoing);
+        const incoming = reverse.get(edge.target) ?? [];
+        incoming.push(edge.source);
+        reverse.set(edge.target, incoming);
+      }
+      const walk = (adjacency: Map<string, string[]>): Set<string> => {
+        const seen = new Set(anchors);
+        const queue = [...anchors];
+        for (let i = 0; i < queue.length; i++) {
+          for (const next of adjacency.get(queue[i]!) ?? []) {
+            if (seen.has(next)) continue;
+            seen.add(next);
+            queue.push(next);
+          }
+        }
+        return seen;
+      };
+      eligibleRootIds = walk(forward);
+      for (const id of walk(reverse)) eligibleRootIds.add(id);
+    }
+
     const roots = subgraph.roots
       .map((id) => subgraph.nodes.get(id))
       .filter((n): n is Node =>
         !!n &&
         MEANINGFUL.has(n.kind) &&
-        (pinnedFileNorms.size === 0 || pinnedFileNorms.has(rel(n.filePath).toLowerCase()))
+        (!eligibleRootIds || eligibleRootIds.has(n.id))
       )
       .slice(0, ROOT_CAP);
     if (roots.length === 0) return '';
