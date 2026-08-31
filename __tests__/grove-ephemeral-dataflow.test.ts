@@ -347,6 +347,28 @@ def root(SeedGeometry, ResolutionLength):
     return group_003
 `;
 
+// Two same-leaf function scopes in ONE file: the persisted function seed is
+// ambiguous and the analyzer must fail closed with the exact reason.
+const DUPLICATE_FUNCTION_SOURCE = `from src.grove import node_tree, repeat_zone
+
+def emit_cap(front, cap, active):
+    return front
+
+@node_tree(id="duplicate-emit", target="geometry")
+def roof(FlatTop, MaxRise):
+    @repeat_zone(iterations=2)
+    def emit_cap(front, cap, index):
+        return front
+    result = emit_cap(FlatTop, MaxRise, False)
+    return result
+`;
+
+// Ordinary Python with an underscore-named persisted function: the function
+// seed path must still render nothing because the source is not Grove.
+const NON_GROVE_FUNCTION_SOURCE = `def helper_emit(value):
+    return value
+`;
+
 const DUPLICATE_KEYWORD_SOURCE = `from grove import node_tree
 
 def branch_distortion(curve, resolution_length):
@@ -789,6 +811,8 @@ describe('query-time Grove ephemeral dataflow', () => {
     fs.writeFileSync(path.join(testDir, 'ingested.grove.py'), INGESTED_SOURCE);
     fs.writeFileSync(path.join(testDir, 'pipeline-snapshot.grove.py'), SNAPSHOT_SOURCE);
     fs.writeFileSync(path.join(testDir, 'ordinary.py'), NON_GROVE_SOURCE);
+    fs.writeFileSync(path.join(testDir, 'duplicate-emit.grove.py'), DUPLICATE_FUNCTION_SOURCE);
+    fs.writeFileSync(path.join(testDir, 'ordinary-helper.py'), NON_GROVE_FUNCTION_SOURCE);
     fs.writeFileSync(path.join(testDir, 'long-chain.grove.py'), LONG_GROVE_SOURCE);
     fs.writeFileSync(path.join(testDir, 'k2-boundary.grove.py'), K2_BOUNDARY_SOURCE);
     cg = CodeGraph.initSync(testDir);
@@ -905,5 +929,78 @@ describe('query-time Grove ephemeral dataflow', () => {
     }
     expect((text.match(/^- /gm) ?? []).length).toBeLessThanOrEqual(64);
     expect(text).not.toContain('pipeline-snapshot.grove.py');
+  });
+
+  // C3R gate repair: the MCP layer used to invoke the analyzer only when at
+  // least one precise identifier was NOT a persisted node in the pinned file,
+  // so the C1 BNO query — whose sole identifier `skel_cap_emit` names a
+  // persisted Grove function — rendered no Dataflow surface at all.
+  describe('persisted function seeds', () => {
+    it('renders the Dataflow surface when the query names only a persisted Grove function', async () => {
+      const result = await handler.execute('codegraph_explore', {
+        query:
+          'In exact file zones.grove.py trace skel_cap_emit dependency and tuple flow, ' +
+          'including zone ownership.',
+        maxFiles: 4,
+      });
+      const text = result.content?.[0]?.text ?? '';
+
+      expect(text).toContain('**Dataflow (within `zones.grove.py`, direct wires only)**');
+      expect(text).toContain('ZONE solve kind=repeat state-arity=2 owner=roof');
+      expect(text).toContain('ZONE state kind=simulation state-arity=2 owner=roof::solve');
+      expect(text).toContain('ARG capped_end -> skel_cap_emit.active');
+      expect(text).toContain('RET skel_cap_emit[0] -> result');
+      expect(text).not.toContain('pipeline-snapshot.grove.py');
+    });
+
+    it('fails closed with the exact reason when a persisted function seed is ambiguous in the pinned file', async () => {
+      const result = await handler.execute('codegraph_explore', {
+        query: 'In exact file duplicate-emit.grove.py trace emit_cap tuple flow.',
+        maxFiles: 4,
+      });
+      const text = result.content?.[0]?.text ?? '';
+
+      expect(text).toContain('REJECTED: ambiguous function seed emit_cap');
+      expect(text).not.toMatch(/ARG .* -> emit_cap\./);
+      expect(text).not.toMatch(/RET emit_cap\[\d+\] -> /);
+    });
+
+    it('says why no slice was selected instead of omitting the surface for a seed matching nothing', async () => {
+      const result = await handler.execute('codegraph_explore', {
+        query: 'In exact file zones.grove.py trace NothingMatching tuple flow.',
+        maxFiles: 4,
+      });
+      const text = result.content?.[0]?.text ?? '';
+
+      expect(text).toContain('**Dataflow (within `zones.grove.py`, direct wires only)**');
+      expect(text).toContain(
+        'INCOMPLETE: no value binding or function boundary in this file matches NothingMatching',
+      );
+    });
+
+    it('keeps the absent-path fail-closed response for Grove queries', async () => {
+      const result = await handler.execute('codegraph_explore', {
+        query:
+          'In exact file missing-current.grove.py trace skel_cap_emit dependency and tuple flow.',
+        maxFiles: 4,
+      });
+      const text = result.content?.[0]?.text ?? '';
+
+      expect(text).toContain('No indexed file uniquely matches');
+      expect(text).toContain('missing-current.grove.py');
+      expect(text).not.toContain('**Dataflow');
+      expect(text).not.toContain('**Source Code**');
+    });
+
+    it('renders no Dataflow surface for a persisted function seed in a non-Grove Python file', async () => {
+      const result = await handler.execute('codegraph_explore', {
+        query: 'In exact file ordinary-helper.py trace helper_emit flow.',
+        maxFiles: 4,
+      });
+      const text = result.content?.[0]?.text ?? '';
+
+      expect(text).not.toContain('**Dataflow (within');
+      expect(text).toContain('ordinary-helper.py');
+    });
   });
 });

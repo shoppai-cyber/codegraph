@@ -3405,7 +3405,9 @@ export class ToolHandler {
 
     // Grove's local bindings are intentionally query-time facts. They are only
     // eligible when one exact Python file is pinned and the query names a
-    // precise identifier that the persistent graph cannot resolve in that file.
+    // precise identifier that the persistent graph cannot resolve in that file,
+    // or a precise identifier that names a persisted function in that file (a
+    // Grove group/zone boundary the analyzer binds to its exact call site).
     // This keeps ordinary and unpinned exploration byte-for-byte unchanged and
     // prevents a same-named snapshot from becoming a dataflow source.
     let ephemeralDataflow: EphemeralDataflowResult = { text: '', spans: [], factCount: 0 };
@@ -3423,14 +3425,31 @@ export class ToolHandler {
               return true;
             }
           });
-          if (unresolvedIdentifiers.length > 0) {
+          // When every precise identifier is persisted, the seed set used to be
+          // empty and the analyzer never ran — so a query naming only a Grove
+          // function (the C1 BNO shape: `skel_cap_emit`) silently rendered no
+          // Dataflow surface. Fall back to identifiers naming a persisted
+          // function/method node in the pinned file; the analyzer itself still
+          // fail-closes on non-Grove sources and rejects ambiguous or
+          // unattributable boundaries with the exact reason.
+          const seedIdentifiers = unresolvedIdentifiers.length > 0
+            ? unresolvedIdentifiers
+            : preciseIdentifiers.filter((identifier) => {
+              try {
+                return cg.getNodesByName(identifier).some((node) =>
+                  node.filePath === pinnedFile && (node.kind === 'function' || node.kind === 'method'));
+              } catch {
+                return false;
+              }
+            });
+          if (seedIdentifiers.length > 0) {
             const sourceLineCount = pinnedContent.split(/\r?\n/).length;
             const dataflowCap = sourceLineCount < 200 ? 16 : sourceLineCount < 2000 ? 32 : 64;
             ephemeralDataflow = await buildGroveEphemeralDataflow(
               pinnedContent,
               pinnedFile,
               matchQuery,
-              unresolvedIdentifiers,
+              seedIdentifiers,
               dataflowCap,
             );
           }
