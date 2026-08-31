@@ -123,6 +123,48 @@ describe('extractQueryPaths — resolution and stripping', () => {
     expect(out.strippedQuery).toBe('crash in on load');
   });
 
+  it('strips and reports unavailable source basenames without a directory', () => {
+    const out = extractQueryPaths(
+      'In the exact current files test_gn_roof_flat_top.py and probe_k3_semantic_output.py show fixtures',
+      INDEX,
+    );
+    expect(out.pinnedFiles).toEqual([]);
+    expect(out.unresolvedPathSpans).toEqual([
+      'test_gn_roof_flat_top.py',
+      'probe_k3_semantic_output.py',
+    ]);
+    expect(out.strippedQuery).toBe('In the exact current files and show fixtures');
+  });
+
+  it('retains a present exact file while reporting a missing basename', () => {
+    const out = extractQueryPaths(
+      'In src/lib/chat-manager.ts and test_missing_helper.py show chatManager',
+      INDEX,
+    );
+    expect(out.pinnedFiles).toEqual(['src/lib/chat-manager.ts']);
+    expect(out.unresolvedPathSpans).toEqual(['test_missing_helper.py']);
+    expect(out.strippedQuery).toBe('In and show chatManager');
+  });
+
+  it('normalizes and reports an unavailable Windows path', () => {
+    const out = extractQueryPaths(
+      String.raw`In C:\repo\tests\test_missing_helper.py show fixtures`,
+      INDEX,
+    );
+    expect(out.pinnedFiles).toEqual([]);
+    expect(out.unresolvedPathSpans).toEqual(['C:/repo/tests/test_missing_helper.py']);
+    expect(out.strippedQuery).toBe('In show fixtures');
+  });
+
+  it('does not reinterpret an ordinary dotted symbol as an unavailable file', () => {
+    const q = 'how does app.run reach the scroll handler';
+    expect(extractQueryPaths(q, INDEX)).toEqual({
+      strippedQuery: q,
+      pinnedFiles: [],
+      unresolvedPathSpans: [],
+    });
+  });
+
   it('leaves slash-bearing non-paths alone', () => {
     const q = 'does gen_server:call/2 block and/or timeout';
     const out = extractQueryPaths(q, INDEX);

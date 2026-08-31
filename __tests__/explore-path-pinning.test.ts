@@ -90,6 +90,42 @@ describe('path pinning (fix 1)', () => {
     expect(out).toContain('No indexed file uniquely matches');
     expect(out).toContain('src/routes/gone/missing-page.ts');
   });
+
+  it('fails closed when every explicitly named source basename is unavailable', async () => {
+    const out = await explore(
+      'In the exact current files test_gn_roof_flat_top.py and probe_k3_semantic_output.py, ' +
+      'show feedAtBottom, handleFeedScroll, and runId. Do not substitute indexed snapshots.',
+    );
+
+    expect(out).toContain('No indexed file uniquely matches');
+    expect(out).toContain('test_gn_roof_flat_top.py');
+    expect(out).toContain('probe_k3_semantic_output.py');
+    expect(out).not.toContain('**Flow**');
+    expect(out).not.toContain('**Dataflow**');
+    expect(out).not.toContain('**Blast radius');
+    expect(out).not.toContain('**Source Code**');
+  });
+
+  it('fails closed for an unavailable Windows path', async () => {
+    const out = await explore(
+      String.raw`In exact file C:\repo\tests\test_missing_helper.py show feedAtBottom and runId`,
+    );
+
+    expect(out).toContain('No indexed file uniquely matches');
+    expect(out).toContain('C:/repo/tests/test_missing_helper.py');
+    expect(out).not.toContain('**Source Code**');
+  });
+
+  it('keeps a present exact file and identifies a missing source basename', async () => {
+    const out = await explore(
+      `In the exact current files ${TARGET} and test_missing_helper.py show feedAtBottom and handleFeedScroll`,
+    );
+
+    expect(hasSection(out, TARGET)).toBe(true);
+    expect(out).toContain('No indexed file uniquely matches');
+    expect(out).toContain('test_missing_helper.py');
+    expect(hasSection(out, DECOY_CHAT)).toBe(false);
+  });
 });
 
 describe('extension-less kebab basenames (the amnisphere gap)', () => {
