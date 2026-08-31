@@ -710,8 +710,11 @@ describe('C1-reproduced semantic gaps', () => {
 
   it('returns attributable call-boundary tuple facts and zone ownership on the exact BNO file', async () => {
     const content = fs.readFileSync(BNO_LARGE_PATH, 'utf-8');
-    expect(createHash('sha256').update(content).digest('hex'))
-      .toBe('c52a956b2a3df494f169c20687944e1d3cc4f23a1fa20f956e147cd623b69964');
+    // LF-normalized hash of the frozen BNO file (raw mixed-ending bytes hash
+    // c52a956b2a3df494f169c20687944e1d3cc4f23a1fa20f956e147cd623b69964, per
+    // the C1 matrix). Normalized so the pin survives an autocrlf checkout.
+    expect(createHash('sha256').update(content.replace(/\r\n/g, '\n')).digest('hex'))
+      .toBe('229587eb373b6659702ecf55ea84735800a7c62b75e5a036d5eb467f3ed353cc');
     const result = await buildGroveEphemeralDataflow(
       content,
       'rung3b.grove.py',
