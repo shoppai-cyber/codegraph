@@ -646,6 +646,33 @@ describe('query-time Grove analyzer contract', () => {
     expect(gate.text).toBe(threshold.text);
   });
 
+  it('does not give an arbitrary skel_ helper prefix special ranking priority', async () => {
+    const source = `from src.grove import node_tree
+
+def other_validate(value):
+    return value
+
+def skel_validate(value):
+    return value
+
+@node_tree(id="prefix-neutral", target="geometry")
+def prefix_neutral(SeedValue):
+    other_result = other_validate(SeedValue)
+    skel_result = skel_validate(SeedValue)
+    return other_result
+`;
+    const result = await buildGroveEphemeralDataflow(
+      source,
+      'prefix-neutral.grove.py',
+      'trace SeedValue through validate',
+      ['SeedValue'],
+      1,
+    );
+
+    expect(result.text).toContain('ARG SeedValue -> other_validate.value');
+    expect(result.text).not.toContain('ARG SeedValue -> skel_validate.value');
+  });
+
   it('selects the required K2 tuple and zone facts from a generic identifier query', async () => {
     const result = await analyze(
       K2_BOUNDARY_SOURCE,
