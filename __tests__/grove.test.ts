@@ -598,6 +598,29 @@ def interface_metadata(geometry: Geometry, scale: Float = 1.0) -> Geometry:
     ]);
   });
 
+  it('extracts ingested groups with literal panel option dictionaries', () => {
+    const result = groveResolver.extract?.(
+      'graphs/treegenerator.grove.py',
+      `from grove import node_tree
+
+@node_tree(
+    id="ingest.treegenerator.v1",
+    target="geometry",
+    panels={
+        "Tree": {"sockets": ["tree_height"], "default_closed": True},
+        "Leaves": ["density", "leaf_scale"],
+    },
+)
+def treegenerator(tree_height: Geometry, density: Float = 1.0) -> Geometry:
+    return tree_height
+`
+    );
+
+    expect(result?.nodes.map((node) => node.name)).toEqual([
+      'ingest.treegenerator.v1',
+    ]);
+  });
+
   it('extracts ingested groups with literal interface ordering and owned zones', () => {
     const filePath = 'graphs/emitted.grove.py';
     const result = groveResolver.extract?.(

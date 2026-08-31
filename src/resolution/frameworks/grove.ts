@@ -214,10 +214,34 @@ function literalLabelsValue(node: SyntaxNode | null): boolean {
 function literalPanelsValue(node: SyntaxNode | null): boolean {
   const entries = literalDictionaryEntries(node);
   if (!entries) return false;
-  return entries.every(({ value }) =>
-    value.type === 'list' &&
-    value.namedChildren.every((item) => plainStringValue(item) !== null)
-  );
+  return entries.every(({ value }) => {
+    if (value.type === 'list') {
+      return value.namedChildren.every((item) => plainStringValue(item) !== null);
+    }
+    if (value.type !== 'dictionary') return false;
+
+    const options = literalDictionaryEntries(value);
+    if (!options) return false;
+    let socketsSeen = false;
+    for (const { key, value: option } of options) {
+      if (key === 'sockets') {
+        if (
+          option.type !== 'list' ||
+          !option.namedChildren.every((item) => plainStringValue(item) !== null)
+        ) {
+          return false;
+        }
+        socketsSeen = true;
+        continue;
+      }
+      if (key === 'default_closed') {
+        if (option.type !== 'true' && option.type !== 'false') return false;
+        continue;
+      }
+      return false;
+    }
+    return socketsSeen;
+  });
 }
 
 function literalStringPairSequenceValue(node: SyntaxNode | null): boolean {
