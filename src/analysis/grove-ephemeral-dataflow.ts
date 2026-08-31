@@ -80,10 +80,16 @@ const BRANCH_TYPES = new Set([
   'try_statement',
   'except_clause',
   'finally_clause',
-  'with_statement',
 ]);
 
 const FUNCTION_TYPES = new Set(['function_definition', 'decorated_definition']);
+
+// Grove emits `linked_defaults={...}` as call-site provenance metadata on nearly
+// every generated call. It never names a declared socket parameter and carries
+// no dataflow of its own. This analyzer only ever runs on a file that already
+// carries a `@node_tree` decorator, so the exception stays Grove-scoped; a Grove
+// function that really declares a parameter by this name still maps normally.
+const GROVE_CALL_METADATA_KEYWORD = 'linked_defaults';
 
 function lineOf(node: SyntaxNode): number {
   return node.startPosition.row + 1;
@@ -469,6 +475,7 @@ function callArgumentMappings(
       value = argument.childForFieldName('value') ?? argument.namedChild(1) ?? argument;
       parameter = name ? byName.get(name) : undefined;
       if (!parameter) {
+        if (name === GROVE_CALL_METADATA_KEYWORD) continue;
         return { mappings: [], error: `unknown or duplicate keyword argument in ${info.name}`, sources: [...sources.values()] };
       }
     } else {
@@ -690,7 +697,6 @@ function selectedFacts(
   const queryTerms = (query.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [])
     .map((term) => term.toLowerCase())
     .filter((term) => term.length >= 4);
-  const capGateRequested = /\bcap\s+gate\b/i.test(query);
   const labelCallee = (label: string): string | null => {
     const match = label.startsWith('ARG ')
       ? /^ARG\s+[^-]+->\s*([^\.\s]+)/.exec(label)
@@ -701,10 +707,10 @@ function selectedFacts(
     const normalized = value.toLowerCase();
     if (normalized === term || normalized.startsWith(`${term}_`) || term.startsWith(`${normalized}_`)) return true;
     // A prose query commonly says "validation" while the authored helper is
-    // named validate/skel_validate. Six-character stems keep this matching
-    // semantic and bounded without turning ordinary stop words into roots.
+    // named validate. Six-character stems keep this matching semantic and
+    // bounded without turning ordinary stop words into roots.
     if (normalized.length >= 6 && term.length >= 6) {
-      return normalized.replace(/^skel_/, '').slice(0, 6) === term.slice(0, 6);
+      return normalized.slice(0, 6) === term.slice(0, 6);
     }
     return false;
   };
@@ -713,16 +719,6 @@ function selectedFacts(
       (value): value is string => !!value,
     );
     return queryTerms.filter((term) => values.some((value) => mentionsQueryTerm(value, term))).length;
-  };
-  const capGateRelevant = (edge: EdgeFact): boolean => {
-    if (!capGateRequested) return false;
-    const inSolveScope = [edge.source.scope, edge.target.scope].some((scope) =>
-      scope.name === 'solve' || scope.name.endsWith('::solve'),
-    );
-    if (!inSolveScope) return false;
-    return [edge.source.name, edge.target.name].some((name) =>
-      name.startsWith('cap_') || name.startsWith('gate_') || name.endsWith('_capped'),
-    );
   };
   const queryRelevant = (edge: EdgeFact): boolean => queryMatchCount(edge) > 0;
   const rootScopes = [...new Set(roots.map((root) => root.scope))];
@@ -784,16 +780,12 @@ function selectedFacts(
     // per-file ceiling even when structural zone bullets consume slots.
     const queryMatches = queryMatchCount(edge);
     score += queryMatches * 180;
-    // The phrase "cap gate" is a bounded semantic request for the named
-    // gate-local bindings in the solve scope; keep those source spans ahead of
-    // unrelated helper internals in a large file.
-    if (capGateRelevant(edge)) score += 3000;
     // An anchored return is the explicit bridge from a queried semantic stage
     // (for example, "validation") into the owning scope. Keep that bridge in
     // the bounded result even when the file has many unrelated helper wires.
     if (anchorEdgeSet.has(edge)) score += 1600;
     // Two query-matched endpoints describe an explicit boundary request, such
-    // as `capped_end -> skel_cap_emit.active`, rather than incidental context.
+    // as `capped_end -> emit.active`, rather than incidental context.
     if (queryMatches > 1) score += 1800;
     // Preserve the complete fan-in once any dependency of a value is relevant.
     // Otherwise a bounded slice can retain the queried direct input and drop

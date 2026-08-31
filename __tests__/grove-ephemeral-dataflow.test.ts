@@ -293,6 +293,81 @@ def root(SeedValue):
     return first
 `;
 
+// Grove emits panel groups wrapped in `with frame("..."):`. A `with` body runs
+// exactly once, so its assignments are unconditional dataflow, unlike `if`/`for`.
+const WITH_FRAME_SOURCE = `from grove import node_tree, frame
+from grove.geo import combine_xyz, curve_primitive_line, store_named_attribute
+
+@node_tree(id="with-frame", target="geometry")
+def root(tree_height):
+    with frame("Trunk"):
+        n_combine_xyz = combine_xyz(z=tree_height)
+        curve_line = curve_primitive_line(end=n_combine_xyz)
+        with frame("Nested"):
+            nested_line = store_named_attribute(geometry=curve_line)
+    return nested_line
+`;
+
+// Control: a real branch stays a branch even in a file that also uses frames.
+const BRANCH_CONTROL_SOURCE = `from grove import node_tree, frame
+
+@node_tree(id="branch-control", target="geometry")
+def root(SeedValue, Toggle):
+    with frame("Trunk"):
+        framed = SeedValue
+    if Toggle:
+        conditional = framed
+    for item in Toggle:
+        looped = framed
+    return framed
+`;
+
+// Grove emits `linked_defaults={...}` as call-site provenance metadata on
+// nearly every generated call. It never names a declared parameter.
+const LINKED_DEFAULTS_SOURCE = `from grove import node_tree
+
+def branch_distortion(curve, resolution_length, noise_scale):
+    return curve
+
+@node_tree(id="linked-defaults", target="geometry")
+def root(SeedGeometry, ResolutionLength, NoiseScale):
+    group_003 = branch_distortion(curve=SeedGeometry, resolution_length=ResolutionLength, noise_scale=NoiseScale, linked_defaults={"resolution_length": 0.03})
+    return group_003
+`;
+
+const UNKNOWN_KEYWORD_SOURCE = `from grove import node_tree
+
+def branch_distortion(curve, resolution_length):
+    return curve
+
+@node_tree(id="unknown-keyword", target="geometry")
+def root(SeedGeometry, ResolutionLength):
+    group_003 = branch_distortion(curve=SeedGeometry, resolution_length=ResolutionLength, unknown_socket=1.0)
+    return group_003
+`;
+
+const DUPLICATE_KEYWORD_SOURCE = `from grove import node_tree
+
+def branch_distortion(curve, resolution_length):
+    return curve
+
+@node_tree(id="duplicate-keyword", target="geometry")
+def root(SeedGeometry, ResolutionLength):
+    group_003 = branch_distortion(SeedGeometry, curve=SeedGeometry, resolution_length=ResolutionLength, linked_defaults={"resolution_length": 0.03})
+    return group_003
+`;
+
+const LINKED_DEFAULTS_ARITY_SOURCE = `from grove import node_tree
+
+def branch_distortion(curve, resolution_length, noise_scale):
+    return curve
+
+@node_tree(id="linked-defaults-arity", target="geometry")
+def root(SeedGeometry, ResolutionLength):
+    group_003 = branch_distortion(curve=SeedGeometry, resolution_length=ResolutionLength, linked_defaults={"noise_scale": 0.66})
+    return group_003
+`;
+
 async function analyze(source: string, filePath: string, query: string, seeds: string[]) {
   return await buildGroveEphemeralDataflow(source, filePath, query, seeds, 64);
 }
@@ -475,6 +550,126 @@ describe('query-time Grove analyzer contract', () => {
     expect(result.text).toContain('ZONE solve kind=repeat state-arity=1');
     expect(result.text).not.toContain('requires a trailing implicit index parameter');
   });
+  it('keeps assignments inside Grove `with frame(...)` blocks as unconditional wires', async () => {
+    const result = await analyze(
+      WITH_FRAME_SOURCE,
+      'with-frame.grove.py',
+      'trace tree_height through n_combine_xyz curve_line nested_line',
+      ['tree_height'],
+    );
+
+    expect(result.text).toContain('tree_height -> n_combine_xyz');
+    expect(result.text).toContain('n_combine_xyz -> curve_line');
+    expect(result.text).toContain('curve_line -> nested_line');
+    expect(result.text).not.toContain('branch assignment');
+  });
+
+  it('still rejects genuine conditional and loop assignments in a framed file', async () => {
+    const result = await analyze(
+      BRANCH_CONTROL_SOURCE,
+      'branch-control.grove.py',
+      'trace SeedValue through framed conditional looped',
+      ['SeedValue'],
+    );
+
+    expect(result.text).toContain('SeedValue -> framed');
+    expect(result.text).toContain('REJECTED: branch assignment of conditional is unsupported');
+    expect(result.text).toContain('REJECTED: branch assignment of looped is unsupported');
+  });
+
+  it('ignores Grove `linked_defaults=` call metadata while mapping every declared argument', async () => {
+    const result = await analyze(
+      LINKED_DEFAULTS_SOURCE,
+      'linked-defaults.grove.py',
+      'trace SeedGeometry ResolutionLength NoiseScale through branch_distortion group_003',
+      ['SeedGeometry', 'ResolutionLength', 'NoiseScale'],
+    );
+
+    expect(result.text).toContain('ARG SeedGeometry -> branch_distortion.curve');
+    expect(result.text).toContain('ARG ResolutionLength -> branch_distortion.resolution_length');
+    expect(result.text).toContain('ARG NoiseScale -> branch_distortion.noise_scale');
+    expect(result.text).toContain('RET branch_distortion[0] -> group_003');
+    expect(result.text).not.toContain('unknown or duplicate keyword argument');
+    expect(result.text).not.toContain('linked_defaults');
+  });
+
+  it('still fails closed on an unknown non-Grove keyword argument', async () => {
+    const result = await analyze(
+      UNKNOWN_KEYWORD_SOURCE,
+      'unknown-keyword.grove.py',
+      'trace SeedGeometry ResolutionLength through branch_distortion group_003',
+      ['SeedGeometry', 'ResolutionLength'],
+    );
+
+    expect(result.text).toContain('REJECTED: unknown or duplicate keyword argument in branch_distortion');
+    expect(result.text).not.toContain('ARG SeedGeometry -> branch_distortion.curve');
+  });
+
+  it('still fails closed on a duplicate argument even when `linked_defaults=` is present', async () => {
+    const result = await analyze(
+      DUPLICATE_KEYWORD_SOURCE,
+      'duplicate-keyword.grove.py',
+      'trace SeedGeometry ResolutionLength through branch_distortion group_003',
+      ['SeedGeometry', 'ResolutionLength'],
+    );
+
+    expect(result.text).toContain('REJECTED: duplicate argument curve calling branch_distortion');
+    expect(result.text).not.toContain('ARG ResolutionLength -> branch_distortion.resolution_length');
+  });
+
+  it('still fails closed on an arity mismatch that `linked_defaults=` does not satisfy', async () => {
+    const result = await analyze(
+      LINKED_DEFAULTS_ARITY_SOURCE,
+      'linked-defaults-arity.grove.py',
+      'trace SeedGeometry ResolutionLength through branch_distortion group_003',
+      ['SeedGeometry', 'ResolutionLength'],
+    );
+
+    expect(result.text).toContain('REJECTED: argument arity mismatch calling branch_distortion');
+    expect(result.text).not.toContain('ARG SeedGeometry -> branch_distortion.curve');
+  });
+  it('selects the same K2 facts regardless of the prose phrase used for the gate', async () => {
+    const seeds = ['FlatTop', 'MaxRise'];
+    const base =
+      'In exact file k2-boundary.grove.py trace FlatTop and MaxRise through code-8 validation, ' +
+      't_cap, the nested solve %PHRASE%, capped tuple state, and the sole emit call.';
+    const gate = await buildGroveEphemeralDataflow(
+      K2_BOUNDARY_SOURCE, 'k2-boundary.grove.py', base.replace('%PHRASE%', 'cap gate'), seeds, 16,
+    );
+    const threshold = await buildGroveEphemeralDataflow(
+      K2_BOUNDARY_SOURCE, 'k2-boundary.grove.py', base.replace('%PHRASE%', 'cap threshold'), seeds, 16,
+    );
+
+    // Ranking must be driven by the identifiers a query names, never by one
+    // fixture's prose wording. Two synonyms that name no new identifier must
+    // select the same bounded slice.
+    expect(gate.text).toBe(threshold.text);
+  });
+
+  it('selects the required K2 tuple and zone facts from a generic identifier query', async () => {
+    const result = await analyze(
+      K2_BOUNDARY_SOURCE,
+      'k2-boundary.grove.py',
+      'In exact file k2-boundary.grove.py trace FlatTop and MaxRise through validate, t_cap, ' +
+        'cap_now, next_capped, the nested solve and state zones, capped_end and emit.',
+      ['FlatTop', 'MaxRise'],
+    );
+
+    for (const fact of [
+      'RET validate[0] -> w8_bad',
+      'w8_bad -> w8_all',
+      'MaxRise -> t_cap',
+      'ZONE solve kind=repeat state-arity=2 owner=roof',
+      'ZONE state kind=simulation state-arity=2 owner=roof::solve',
+      'cap_now -> next_capped',
+      'ARG next_capped -> state.active',
+      'RET solve[1] -> capped_end',
+      'ARG capped_end -> emit.active',
+      'ARG t_cap -> emit.cap',
+    ]) {
+      expect(result.text).toContain(fact);
+    }
+  });
 });
 
 describe('query-time Grove ephemeral dataflow', () => {
@@ -590,7 +785,7 @@ describe('query-time Grove ephemeral dataflow', () => {
     const result = await handler.execute('codegraph_explore', {
       query:
         'In exact file k2-boundary.grove.py trace FlatTop and MaxRise through code-8 validation, ' +
-        't_cap, the nested solve cap gate, capped tuple state, and the sole emit call.',
+        't_cap, the nested solve threshold, capped tuple state, and the sole emit call.',
       maxFiles: 4,
     });
     const text = result.content?.[0]?.text ?? '';
