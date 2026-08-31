@@ -70,6 +70,14 @@ const MAX_CANDIDATE_SPANS = 8;
 const DOTTED_BASENAME = /^[^\s/\\]+\.[A-Za-z][A-Za-z0-9]{0,7}$/;
 
 /**
+ * Source extensions that make a dotted basename an explicit file reference
+ * even when the query omits its directory. This deliberately excludes generic
+ * dotted symbols (`app.run`): a missing basename cannot resolve against the
+ * index, so its source-file shape is the remaining fail-closed signal.
+ */
+const SOURCE_BASENAME = /\.(?:astro|c|cc|cjs|cpp|cs|cxx|dart|erl|go|h|hpp|hrl|java|js|jsx|kt|kts|lua|mjs|php|py|rb|rs|scala|svelte|swift|ts|tsx|vue)$/i;
+
+/**
  * Extension-less kebab basename (`background-image-table`). Hyphens are
  * illegal in identifiers, so consuming these tokens can never steal one from
  * the named-symbol seeder; ≥2 segments keeps single words out.
@@ -145,11 +153,15 @@ function normalizeSpan(span: string): string {
     .replace(/\/+$/, '');
 }
 
-/** Path-shaped beyond doubt: ≥2 segments and a dot-extension on the last. */
+/**
+ * File-shaped beyond doubt: either a path with ≥2 segments and a dotted
+ * basename, or a bare basename carrying a recognized source extension.
+ */
 function isClearlyPathShaped(normalized: string): boolean {
   const slash = normalized.lastIndexOf('/');
-  if (slash <= 0) return false;
-  return DOTTED_BASENAME.test(normalized.slice(slash + 1));
+  const basename = normalized.slice(slash + 1);
+  if (!DOTTED_BASENAME.test(basename)) return false;
+  return slash > 0 || SOURCE_BASENAME.test(basename);
 }
 
 /**

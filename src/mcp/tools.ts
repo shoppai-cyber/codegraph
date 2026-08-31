@@ -3403,6 +3403,22 @@ export class ToolHandler {
     // byte-identical. It only OBSERVES: it must never feed back into rendering.
     const diag = ExploreDiagnostics.start(query, projectRoot, budget, maxFiles, indexedFileCount);
 
+    // If every explicit file reference is unavailable, fail closed before the
+    // fuzzy symbol/FTS pipeline can substitute unrelated indexed files. This is
+    // a normal, recoverable query result (success-shaped, not `isError`): the
+    // agent can correct the file name or index. Mixed requests continue below
+    // so resolved pins still render, with the missing spans reported in the
+    // summary.
+    if (unresolvedPathSpans.length > 0 && pinnedFiles.length === 0) {
+      const unavailable =
+        `No indexed file uniquely matches ${unresolvedPathSpans.map((s) => `\`${s}\``).join(', ')}. ` +
+        'No source, Flow, Dataflow, or blast-radius content was returned because every explicitly named file is unavailable in this index.';
+      diag?.finishEmpty('every explicitly named file is unavailable');
+      return this.exploreResult(unavailable, {
+        projectRoot, query, files: [], sourceBytes: 0, responseBytes: unavailable.length,
+      });
+    }
+
     // What this session has already been served for THIS project (CG-17), and
     // whether this call may act on it (CG-18). Dedup is off on the session's
     // first call by construction — there is nothing to point back AT — and off
