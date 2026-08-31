@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import CodeGraph from '../src/index';
 import { buildGroveEphemeralDataflow } from '../src/analysis/grove-ephemeral-dataflow';
 import { ToolHandler } from '../src/mcp/tools';
@@ -696,6 +697,80 @@ def prefix_neutral(SeedValue):
     ]) {
       expect(result.text).toContain(fact);
     }
+  });
+});
+
+// The C1 matrix classified the large BNO exact query EXPLICITLY_INCOMPLETE: the
+// only precise identifier in the query (`skel_cap_emit`) names a function, so
+// the analyzer found no value roots and silently omitted the Dataflow surface.
+// These tests pin the repaired contract: the boundary facts are attributable,
+// zone ownership stays distinct, and any unresolvable slice says why.
+describe('C1-reproduced semantic gaps', () => {
+  const BNO_LARGE_PATH = path.join(__dirname, 'fixtures', 'grove', 'rung3b.grove.py');
+
+  it('returns attributable call-boundary tuple facts and zone ownership on the exact BNO file', async () => {
+    const content = fs.readFileSync(BNO_LARGE_PATH, 'utf-8');
+    expect(createHash('sha256').update(content).digest('hex'))
+      .toBe('c52a956b2a3df494f169c20687944e1d3cc4f23a1fa20f956e147cd623b69964');
+    const result = await buildGroveEphemeralDataflow(
+      content,
+      'rung3b.grove.py',
+      'trace the current roof to solve to skel_cap_emit dependency and tuple flow, including zone ' +
+        'ownership. Do not substitute a same-named group from another file.',
+      ['skel_cap_emit'],
+      64,
+    );
+
+    expect(result.factCount).toBeGreaterThan(0);
+    expect(result.text).toContain('ARG capped_end -> skel_cap_emit.active');
+    expect(result.text).toContain('RET skel_cap_emit[0] -> cap_arcs');
+    expect(result.text).toContain('RET solve[8] -> capped_end');
+    expect(result.text).toContain('ZONE solve kind=repeat state-arity=9 owner=roof');
+    expect(result.text).not.toContain('ZONE solve kind=simulation');
+  });
+
+  it('anchors Repeat versus Simulation ownership from a function-name seed without mixing kinds', async () => {
+    const result = await buildGroveEphemeralDataflow(
+      ZONE_SOURCE,
+      'zones.grove.py',
+      'trace skel_cap_emit tuple flow including nested zone ownership',
+      ['skel_cap_emit'],
+      64,
+    );
+
+    expect(result.factCount).toBeGreaterThan(0);
+    expect(result.text).toContain('ZONE solve kind=repeat state-arity=2 owner=roof');
+    expect(result.text).toContain('ZONE state kind=simulation state-arity=2 owner=roof::solve');
+    expect(result.text).toContain('ARG capped_end -> skel_cap_emit.active');
+    expect(result.text).not.toContain('ZONE solve kind=simulation');
+    expect(result.text).not.toContain('ZONE state kind=repeat');
+  });
+
+  it('returns an explicit bounded-incomplete reason when a function seed names an unsupported zone', async () => {
+    const result = await buildGroveEphemeralDataflow(
+      UNSUPPORTED_ZONE_SOURCE,
+      'unsupported-zone.grove.py',
+      'trace each zone ownership',
+      ['each'],
+      64,
+    );
+
+    expect(result.factCount).toBeGreaterThan(0);
+    expect(result.text).toContain('REJECTED: unsupported foreach zone each');
+    expect(result.text).not.toContain('ZONE ');
+  });
+
+  it('says why the slice is incomplete instead of silently omitting the Dataflow surface', async () => {
+    const result = await buildGroveEphemeralDataflow(
+      PIPELINE_SOURCE,
+      'pipeline.grove.py',
+      'trace NothingMatching anywhere',
+      ['NothingMatching'],
+      64,
+    );
+
+    expect(result.factCount).toBeGreaterThan(0);
+    expect(result.text).toContain('INCOMPLETE: no value binding or function boundary in this file matches');
   });
 });
 

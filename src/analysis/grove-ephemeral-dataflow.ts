@@ -57,6 +57,10 @@ interface EdgeFact {
   line: number;
   label: string;
   kind: 'WIRE' | 'ARG' | 'RET';
+  // The function whose call boundary this edge crosses (null for plain wires).
+  // Kept structurally so a seed naming a function anchors on its exact ARG/RET
+  // edges instead of matching rendered label text.
+  callee: Scope | null;
 }
 
 interface ReturnSpec {
@@ -440,10 +444,18 @@ function validateZone(scope: FunctionScope): void {
   scope.zoneError = `repeat zone ${scope.name.split('::').at(-1)} requires a trailing implicit index parameter`;
 }
 
-function addEdge(edges: EdgeFact[], source: Binding, target: Binding, line: number, label: string, kind: EdgeFact['kind']): void {
+function addEdge(
+  edges: EdgeFact[],
+  source: Binding,
+  target: Binding,
+  line: number,
+  label: string,
+  kind: EdgeFact['kind'],
+  callee: Scope | null = null,
+): void {
   if (source.invalid || target.invalid) return;
   if (edges.some((edge) => edge.source.id === source.id && edge.target.id === target.id && edge.label === label)) return;
-  edges.push({ source, target, line, label, kind });
+  edges.push({ source, target, line, label, kind, callee });
 }
 
 interface CallMapping {
@@ -520,7 +532,7 @@ function mapCallArguments(
   }
   for (const mapping of mapped.mappings) {
     for (const source of expressionReferences(mapping.value, caller)) {
-      addEdge(edges, source, mapping.parameter, lineOf(call), `ARG ${source.name} -> ${callee.name.split('::').at(-1)}.${mapping.parameter.name}`, 'ARG');
+      addEdge(edges, source, mapping.parameter, lineOf(call), `ARG ${source.name} -> ${callee.name.split('::').at(-1)}.${mapping.parameter.name}`, 'ARG', callee);
     }
   }
 }
@@ -565,7 +577,7 @@ function mapAssignment(
     for (let index = 0; index < targetBindings.length; index++) {
       const target = targetBindings[index]!;
       for (const source of returnSpec.refs[index] ?? []) {
-        addEdge(edges, source, target, lineOf(assignment), `RET ${callee!.name}[${index}] -> ${target.name}`, 'RET');
+        addEdge(edges, source, target, lineOf(assignment), `RET ${callee!.name}[${index}] -> ${target.name}`, 'RET', calleeScope);
       }
     }
     return;
@@ -663,20 +675,80 @@ function selectRootBindings(
   return { roots: selected, rejections };
 }
 
+function scopeMatchesSeed(scope: Scope, seed: string): boolean {
+  return scope.name === seed || scope.name.split('::').at(-1) === seed;
+}
+
+// A query's precise identifiers may name functions (Grove groups and zones),
+// not local values. `selectRootBindings` finds nothing for those and the C1
+// matrix showed the resulting silent omission on the large BNO exact file.
+// Anchor the slice on the named function's exact call-boundary edges instead,
+// and fail closed with the exact reason when no boundary is attributable.
+function selectBoundaryAnchors(
+  scopes: FunctionScope[],
+  edges: EdgeFact[],
+  seeds: readonly string[],
+): { anchors: EdgeFact[]; rejections: Array<{ line: number; message: string }> } {
+  const anchors: EdgeFact[] = [];
+  const rejections: Array<{ line: number; message: string }> = [];
+  for (const seed of new Set(seeds)) {
+    const matches = scopes.filter((scope) => scopeMatchesSeed(scope, seed));
+    if (matches.length === 0) continue;
+    if (matches.length > 1) {
+      const owners = matches.map((scope) => scope.name).sort();
+      rejections.push({
+        line: Math.min(...matches.map((scope) => lineOf(scope.node))),
+        message: `ambiguous function seed ${seed} across scopes ${owners.join(', ')}`,
+      });
+      continue;
+    }
+    const scope = matches[0]!;
+    if (scope.zoneError) {
+      rejections.push({ line: scope.zoneLine, message: scope.zoneError });
+      continue;
+    }
+    const boundary = edges.filter((edge) => edge.callee === scope);
+    if (boundary.length === 0) {
+      rejections.push({
+        line: lineOf(scope.node),
+        message: `no attributable call boundary for ${seed} in this file`,
+      });
+      continue;
+    }
+    anchors.push(...boundary);
+  }
+  return { anchors, rejections };
+}
+
 function selectedFacts(
   edges: EdgeFact[],
   roots: Binding[],
   focusNames: ReadonlySet<string>,
   query: string,
   maxLines: number,
+  boundaryAnchors: readonly EdgeFact[] = [],
 ): { edges: EdgeFact[]; reachable: Set<string> } {
   const distances = new Map<string, number>();
   const queue: Binding[] = [];
   const outgoing = new Map<string, EdgeFact[]>();
+  const incoming = new Map<string, EdgeFact[]>();
   for (const edge of edges) {
-    const bucket = outgoing.get(edge.source.id) ?? [];
-    bucket.push(edge);
-    outgoing.set(edge.source.id, bucket);
+    const outBucket = outgoing.get(edge.source.id) ?? [];
+    outBucket.push(edge);
+    outgoing.set(edge.source.id, outBucket);
+    const inBucket = incoming.get(edge.target.id) ?? [];
+    inBucket.push(edge);
+    incoming.set(edge.target.id, inBucket);
+  }
+  const boundaryAnchorSet = new Set(boundaryAnchors);
+  const anchorSourceIds = new Set(boundaryAnchors.map((anchor) => anchor.source.id));
+  for (const anchor of boundaryAnchors) {
+    for (const endpoint of [anchor.source, anchor.target]) {
+      if (!distances.has(endpoint.id)) {
+        distances.set(endpoint.id, 0);
+        queue.push(endpoint);
+      }
+    }
   }
   for (const root of roots) {
     if (!distances.has(root.id)) {
@@ -691,6 +763,21 @@ function selectedFacts(
       if (distances.has(edge.target.id)) continue;
       distances.set(edge.target.id, distance + 1);
       queue.push(edge.target);
+    }
+  }
+  // A boundary anchor's sources name the values fed INTO the requested call.
+  // Walk their producers backward so an anchored slice also attributes the
+  // upstream tuple returns and the zone state that produced those arguments.
+  const backwardQueue = boundaryAnchors.map((anchor) => anchor.source);
+  const backwardSeen = new Set(backwardQueue.map((binding) => binding.id));
+  while (backwardQueue.length > 0) {
+    const binding = backwardQueue.shift()!;
+    for (const edge of incoming.get(binding.id) ?? []) {
+      if (!backwardSeen.has(edge.source.id)) {
+        backwardSeen.add(edge.source.id);
+        backwardQueue.push(edge.source);
+      }
+      if (!distances.has(edge.source.id)) distances.set(edge.source.id, 0);
     }
   }
   const seedReachableIds = new Set(distances.keys());
@@ -746,16 +833,19 @@ function selectedFacts(
   for (const [id, distance] of anchorDistances) {
     if (!distances.has(id)) distances.set(id, distance);
   }
-  const incoming = new Map<string, EdgeFact[]>();
   const selectedReachableEdges = [...new Map(
     edges
       .filter((edge) => distances.has(edge.source.id) || anchorEdgeSet.has(edge))
       .map((edge) => [`${edge.line}:${edge.label}`, edge] as const),
   ).values()];
+  // Fan-in for ranking is counted within the SELECTED slice (as before), not
+  // over every edge in the file — `incoming` above serves the backward
+  // boundary walk and deliberately covers all edges.
+  const selectedIncoming = new Map<string, EdgeFact[]>();
   for (const edge of selectedReachableEdges) {
-    const bucket = incoming.get(edge.target.id) ?? [];
+    const bucket = selectedIncoming.get(edge.target.id) ?? [];
     bucket.push(edge);
-    incoming.set(edge.target.id, bucket);
+    selectedIncoming.set(edge.target.id, bucket);
   }
   // A semantic anchor starts a short closure at its owning value. Preserve
   // the full fan-in of the first value it feeds (e.g. `w8_bad -> w8_all`),
@@ -784,14 +874,22 @@ function selectedFacts(
     // (for example, "validation") into the owning scope. Keep that bridge in
     // the bounded result even when the file has many unrelated helper wires.
     if (anchorEdgeSet.has(edge)) score += 1600;
+    // A boundary anchor IS the requested fact: the seed named this function,
+    // so its argument/return edges outrank every incidental upstream wire.
+    if (boundaryAnchorSet.has(edge)) score += 2400;
+    // The direct producers of an anchored argument (for example the zone's
+    // tuple return that feeds `capped_end`) are the dependency hop the query
+    // names on its way into the boundary; keep them above unrelated wires
+    // that merely share a query term.
+    if (anchorSourceIds.has(edge.target.id)) score += 2000;
     // Two query-matched endpoints describe an explicit boundary request, such
     // as `capped_end -> emit.active`, rather than incidental context.
     if (queryMatches > 1) score += 1800;
     // Preserve the complete fan-in once any dependency of a value is relevant.
     // Otherwise a bounded slice can retain the queried direct input and drop
     // the ordinary-call return that produces the same tuple/boolean value.
-    if (fanInTargets.has(edge.target.id) && (incoming.get(edge.target.id)?.length ?? 0) > 1) score += 1000;
-    if (anchorFanInTargets.has(edge.target.id) && (incoming.get(edge.target.id)?.length ?? 0) > 1) score += 3000;
+    if (fanInTargets.has(edge.target.id) && (selectedIncoming.get(edge.target.id)?.length ?? 0) > 1) score += 1000;
+    if (anchorFanInTargets.has(edge.target.id) && (selectedIncoming.get(edge.target.id)?.length ?? 0) > 1) score += 3000;
     if (edge.kind === 'RET') score += 30;
     if (edge.kind === 'ARG') score += 20;
     score -= (distances.get(edge.source.id) ?? 0);
@@ -846,12 +944,33 @@ export async function buildGroveEphemeralDataflow(
     for (const scope of scopes) processScope(scope, edges);
     const rootSelection = selectRootBindings(scopes, edges, seeds, query);
     const roots = rootSelection.roots;
+    let boundaryAnchors: EdgeFact[] = [];
+    const boundaryRejections: Array<{ line: number; message: string }> = [];
     if (roots.length === 0 && rootSelection.rejections.length === 0) {
-      return { text: '', spans: [], factCount: 0 };
+      // C1 reproduced gap: when every seed names a function (a Grove group or
+      // zone boundary) rather than a local value, the analyzer used to return
+      // nothing at all — the requested Dataflow surface was omitted with no
+      // marker. Anchor on the named call boundary, or say exactly why this
+      // bounded slice is incomplete. Paths that already selected value roots
+      // or emitted seed rejections are byte-for-byte unchanged.
+      const boundary = selectBoundaryAnchors(scopes, edges, seeds);
+      boundaryAnchors = boundary.anchors;
+      boundaryRejections.push(...boundary.rejections);
+      if (boundaryAnchors.length === 0 && boundaryRejections.length === 0) {
+        if (seeds.length === 0) return { text: '', spans: [], factCount: 0 };
+        const seedList = [...new Set(seeds)].join(', ');
+        const lines = [
+          `**Dataflow (within \`${filePath}\`, direct wires only)**`,
+          '> Query-time, exact-file, scope-aware facts; no local nodes or edges are persisted.',
+          `- INCOMPLETE: no value binding or function boundary in this file matches ${seedList}; no attributable slice was selected. [${filePath}]`,
+          '',
+        ];
+        return { text: lines.join('\n'), spans: [], factCount: 1 };
+      }
     }
 
     const focusedNames = new Set(extractQueryIdentifiers(query));
-    const selected = selectedFacts(edges, roots, focusedNames, query, maxLines);
+    const selected = selectedFacts(edges, roots, focusedNames, query, maxLines, boundaryAnchors);
     const zones = relevantZoneScopes(moduleScope, selected.reachable);
     const reasons = scopes
       .flatMap((scope) => scope.reasons)
@@ -868,6 +987,12 @@ export async function buildGroveEphemeralDataflow(
       structuralBullets.push({ line: reason.line, text: `REJECTED: ${reason.message} [${filePath}:${reason.line}]` });
     }
     for (const rejection of rootSelection.rejections) {
+      structuralBullets.push({
+        line: rejection.line,
+        text: `REJECTED: ${rejection.message} [${filePath}:${rejection.line}]`,
+      });
+    }
+    for (const rejection of boundaryRejections) {
       structuralBullets.push({
         line: rejection.line,
         text: `REJECTED: ${rejection.message} [${filePath}:${rejection.line}]`,
