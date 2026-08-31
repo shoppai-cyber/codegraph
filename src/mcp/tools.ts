@@ -41,6 +41,11 @@ import {
 import { createHash } from 'crypto';
 import { clamp, validatePathWithinRoot, validateProjectPath, isConfigLeafNode, CONFIG_LEAF_LANGUAGES } from '../utils';
 import { scanDynamicDispatch } from './dynamic-boundaries';
+import {
+  buildGroveEphemeralDataflow,
+  extractGroveDataflowIdentifiers,
+  type EphemeralDataflowResult,
+} from '../analysis/grove-ephemeral-dataflow';
 import { getUpdateNotice } from '../upgrade/update-check';
 import { ExploreDiagnostics } from './explore-diagnostics';
 import {
@@ -3398,6 +3403,44 @@ export class ToolHandler {
     const pinnedSet = new Set(pinnedFiles);
     const pinnedOrder = new Map(pinnedFiles.map((p, i) => [p, i]));
 
+    // Grove's local bindings are intentionally query-time facts. They are only
+    // eligible when one exact Python file is pinned and the query names a
+    // precise identifier that the persistent graph cannot resolve in that file.
+    // This keeps ordinary and unpinned exploration byte-for-byte unchanged and
+    // prevents a same-named snapshot from becoming a dataflow source.
+    let ephemeralDataflow: EphemeralDataflowResult = { text: '', spans: [], factCount: 0 };
+    if (pinnedFiles.length === 1 && /\.pyw?$/i.test(pinnedFiles[0]!)) {
+      const pinnedFile = pinnedFiles[0]!;
+      const absPinned = validatePathWithinRoot(projectRoot, pinnedFile);
+      if (absPinned && existsSync(absPinned)) {
+        try {
+          const pinnedContent = readFileSync(absPinned, 'utf-8');
+          const preciseIdentifiers = extractGroveDataflowIdentifiers(matchQuery);
+          const unresolvedIdentifiers = preciseIdentifiers.filter((identifier) => {
+            try {
+              return !cg.getNodesByName(identifier).some((node) => node.filePath === pinnedFile);
+            } catch {
+              return true;
+            }
+          });
+          if (unresolvedIdentifiers.length > 0) {
+            const sourceLineCount = pinnedContent.split(/\r?\n/).length;
+            const dataflowCap = sourceLineCount < 200 ? 16 : sourceLineCount < 2000 ? 32 : 64;
+            ephemeralDataflow = await buildGroveEphemeralDataflow(
+              pinnedContent,
+              pinnedFile,
+              matchQuery,
+              unresolvedIdentifiers,
+              dataflowCap,
+            );
+          }
+        } catch {
+          // Dataflow is an optional precision slice; a read or parse miss must
+          // preserve the normal explore response.
+        }
+      }
+    }
+
     // Per-file allocation diagnostic (CG-4). `null` unless CODEGRAPH_EXPLORE_DEBUG
     // is set — every `diag?.` below is then a no-op and the response is
     // byte-identical. It only OBSERVES: it must never feed back into rendering.
@@ -4256,6 +4299,7 @@ export class ToolHandler {
     // and to gate adaptive source sizing: files on the spine get full source,
     // off-spine peers skeletonize.
     const flow = this.buildFlowFromNamedSymbols(cg, matchQuery, pinnedSet);
+    const flowText = ephemeralDataflow.text + flow.text;
 
     // Exact-file exploration renders the pin plus files on a call path anchored
     // to that pin. Globally ranked sibling snapshots are still eligible for the
@@ -4432,7 +4476,7 @@ export class ToolHandler {
     // displacement guard dutifully held bytes back to pay for that section —
     // taking them off a file the agent DOES receive and handing them to one it
     // never sees.
-    let totalChars = flow.text.length + lines.join('\n').length;
+    let totalChars = flowText.length + lines.join('\n').length;
     let filesIncluded = 0;
     // Paths we actually render source for below. Drives the curated header count
     // (#1046) — it must reflect what we show, not the raw candidate gather.
@@ -5152,6 +5196,11 @@ export class ToolHandler {
           // the agent Read it back — the very thing explore exists to prevent).
           return { start: n.startLine, end: n.endLine, name: n.name, kind: n.kind, importance, spine: flow.pathNodeIds.has(n.id), spineCallLine: flow.spineCallSites.get(n.id) };
         });
+      if (filePath === pinnedFiles[0]) {
+        for (const span of ephemeralDataflow.spans) {
+          ranges.push({ start: span.start, end: span.end, name: 'dataflow', kind: 'dataflow', importance: 11, spine: true });
+        }
+      }
 
       // Add edge source locations in this file — captures template references
       // (component usages, event handlers) that aren't nodes themselves.
@@ -5979,7 +6028,7 @@ export class ToolHandler {
     // document order.
     const roomFor = (block: readonly string[]): number =>
       block.reduce((n, s) => n + s.length + 1, 0);
-    let room = hardCeiling - (flow.text.length + lines.join('\n').length);
+    let room = hardCeiling - (flowText.length + lines.join('\n').length);
 
     const keepCompleteness = completenessBlock.length > 0
       && roomFor(completenessBlock) <= room;
@@ -6022,7 +6071,7 @@ export class ToolHandler {
       lines.push('', EPILOGUE_LOST_NOTE);
     }
 
-    const output = flow.text + lines.join('\n');
+    const output = flowText + lines.join('\n');
     let finalText: string;
     // The epilogue costs less than a file section, so it is cut FIRST (CG-31).
     // Dropping a trailing section throws away source the render loop had already
@@ -6031,7 +6080,7 @@ export class ToolHandler {
     // its work. The epilogue is a pointer list and two reminders; its own
     // "explore these names" instruction survives in the note below.
     const epilogueOnlyCut = epilogueStart < lines.length
-      ? flow.text + lines.slice(0, epilogueStart).join('\n')
+      ? flowText + lines.slice(0, epilogueStart).join('\n')
       : null;
     const EPILOGUE_CUT_NOTE = '\n\n> (Trailing notes omitted for size. The source above is complete and verbatim — treat it as already Read. For anything this call did not cover, run another codegraph_explore with the specific names rather than reading those files.)';
 
