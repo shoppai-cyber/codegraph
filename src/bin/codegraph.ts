@@ -20,6 +20,8 @@
  *   codegraph callees <symbol>   Find what a function/method calls
  *   codegraph impact <symbol>    Analyze what code is affected by changing a symbol
  *   codegraph affected [files]   Find test files affected by changes
+ *   codegraph inbox file         File a validated local issue report
+ *   codegraph inbox summary      Summarize local issue reports
  *   codegraph upgrade [version]  Update CodeGraph to the latest release
  */
 
@@ -54,6 +56,7 @@ import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime
 import { installCommandSupervision } from './command-supervision';
 import { EXTRACTION_VERSION } from '../extraction/extraction-version';
 import { getTelemetry, TELEMETRY_DOCS, recordIndexEvent } from '../telemetry';
+import { fileIssueReport, getIssueInboxDir, summarizeIssueInbox } from '../inbox/issue-inbox';
 
 // Decided once, before `--color`/`--no-color` are stripped from argv below
 // (#1281). Piped/redirected stdout, NO_COLOR, or --no-color -> plain output.
@@ -2360,6 +2363,43 @@ program
     } catch (err) {
       error(`Affected analysis failed: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
+    }
+  });
+
+/**
+ * Passive local issue intake. This never contacts a network service or writes
+ * to the diagnosed repository; reports are validated and stored in the user
+ * issue-inbox carrier.
+ */
+const inboxCommand = program
+  .command('inbox')
+  .description('File and summarize local CodeGraph issue reports');
+
+inboxCommand
+  .command('file')
+  .description('Validate and atomically file one local issue report')
+  .requiredOption('--input <absolute-json>', 'Absolute path to the closed-schema report JSON')
+  .action((options: { input: string }) => {
+    try {
+      const result = fileIssueReport(options.input, {
+        productRoot: path.resolve(__dirname, '..', '..'),
+      });
+      console.log(`${result.duplicate ? 'Issue report already filed' : 'Filed issue report'} ${result.reportId} at ${result.reportPath}`);
+    } catch (err) {
+      error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    }
+  });
+
+inboxCommand
+  .command('summary')
+  .description('Print deterministic counts and locations for local issue reports')
+  .action(() => {
+    try {
+      console.log(JSON.stringify(summarizeIssueInbox(getIssueInboxDir()), null, 2));
+    } catch (err) {
+      error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
     }
   });
 
