@@ -86,3 +86,7 @@ target-linux/
 # Fork-local, spent review handoff (self-describes as scratch "delete after the
 # review is done"); kept on disk but out of git. See AGENTS.md review pattern.
 /CODEX-REVIEW-HANDOFF.md
+
+.kommandr/kommandr.db
+.kommandr/kommandr.db-wal
+.kommandr/kommandr.db-shm
