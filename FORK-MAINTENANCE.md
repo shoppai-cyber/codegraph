@@ -3,7 +3,7 @@
 **Audience:** any agent (Claude/Opus, GPT/Codex, GLM) or human maintaining this
 fork. No prior session context required — this document is self-contained.
 
-- **This repo:** `shoppai-cyber/codegraph` (Kyle's private fork; `origin`)
+- **This repo:** `shoppai-cyber/codegraph` (the user's private fork; `origin`)
 - **Upstream:** `colbymchenry/codegraph` (`upstream` remote, read-only)
 - **Fork-only surface:** framework resolvers + extractors (Unity engine
   liveness, FishNet, Unity asset-wiring YAML, Blender, CFML) plus their tests
@@ -58,7 +58,7 @@ case), expect conflicts only in the registry hotspots below.
 
 ### 3. Merge — on a sync branch, never directly on main
 
-Kyle's machines run a branch-safety hook
+The user's machines run a branch-safety hook
 (`~/.claude/hooks/branch-commit-guard.js`) that **blocks `git commit` on
 `main`** whenever the repo has open PRs (and concluding a conflicted merge IS
 a `git commit`). Don't fight it and don't route around it — do the whole sync
@@ -94,7 +94,7 @@ mid-rebuild tree for the duration. A worktree keeps the primary checkout on
   deliberate: it makes the guard over-block, which is an annoyance, whereas the
   obvious "fix" (reading a cwd off the tool input — Claude Code's Bash tool has
   no such field) would silently resolve to `undefined` and disable the guard.
-  **Do not patch it and do not route around it.** Ask Kyle.
+  **Do not patch it and do not route around it.** Ask the user.
 - The guard's `gh pr list` is `--repo`-pinned to the slug parsed from
   `git remote get-url origin`. Unpinned it resolved to *upstream* and returned
   upstream's open PRs, which is what made it fire on this fork at all.
@@ -111,18 +111,24 @@ Both sides register things in the same files; resolution is almost always
 The `1.5.0 verdict` column records what actually happened, because a table that
 was wrong and doesn't say so is worse than no table:
 
-| File | What conflicts | Resolution | 1.5.0 verdict |
-|---|---|---|---|
-| `src/extraction/grammars.ts` | language/wasm registrations | keep both registrations | **FALSIFIED** — auto-merged |
-| `src/extraction/tree-sitter.ts` | routing entries (incl. our `unity_yaml` content-gated routing) | keep both | **FALSIFIED** — auto-merged |
-| `src/extraction/unity-asset-extractor.ts` | fork-only; **holds the `isUnityYaml()` content check** | ours — should never conflict | held (no conflict) |
-| `src/resolution/frameworks/index.ts` | resolver registry entries | keep both entries | **FALSIFIED** — auto-merged |
-| `src/types.ts` | NodeKind/EdgeKind/metadata additions | **append only, never reorder** (see kernel wire contract below) | **FALSIFIED** — auto-merged |
-| `src/db/index.ts`, `src/db/sqlite-adapter.ts` | our read-only/immutable open (d601654) vs upstream's WAL + bulk-load work | **not a registry — real shared logic.** See the d601654 note below | **MISSED** — row added *after* the sync; both real conflicts landed here |
-| `.gitignore` | fork-local ignores vs upstream's | union | **MISSED** — was not in the table |
-| `CHANGELOG.md` | `[Unreleased]` entries | **not a plain union** — see the trap below | correct (2 hunks) |
-| `package.json` / lock | new deps (rare — grammars ship as checked-in `.wasm`) | union `package.json`, then `npm install` to regenerate the lock; never hand-edit the lock | no conflict |
-| `AGENTS.md` / `CLAUDE.md` | doc drift | fork-specific sections are ours; upstream edits to shared how-codegraph-works content win | no conflict |
+| File | What conflicts | Resolution | 1.5.0 verdict | 1.6.1 verdict (2026-10-01) |
+|---|---|---|---|---|
+| `src/extraction/grammars.ts` | language/wasm registrations | keep both registrations | **FALSIFIED** — auto-merged | **FALSIFIED** again — auto-merged |
+| `src/extraction/tree-sitter.ts` | routing entries (incl. our `unity_yaml` content-gated routing) | keep both | **FALSIFIED** — auto-merged | **FALSIFIED** again — auto-merged |
+| `src/extraction/unity-asset-extractor.ts` | fork-only; **holds the `isUnityYaml()` content check** | ours — should never conflict | held (no conflict) | held (no conflict) |
+| `src/resolution/frameworks/index.ts` | resolver registry entries | keep both entries | **FALSIFIED** — auto-merged | **FALSIFIED** again — auto-merged |
+| `src/types.ts` | NodeKind/EdgeKind/metadata additions | **append only, never reorder** (see kernel wire contract below) | **FALSIFIED** — auto-merged | **FALSIFIED** again — auto-merged; order intact |
+| `src/db/index.ts`, `src/db/sqlite-adapter.ts` | our read-only/immutable open (d601654) vs upstream's WAL + bulk-load work | **not a registry — real shared logic.** See the d601654 note below | **MISSED** — row added *after* the sync; both real conflicts landed here | **held** — 2 + 2 hunks; upstream 1.6.1 shipped its own read-only open, see the 1.6.1 addendum to the d601654 note |
+| `src/index.ts` | `CodeGraph` read-only plumbing | take upstream; `readOnly` now lives on `DatabaseConnection` | — | **MISSED** — 3 hunks; resolved to upstream |
+| `src/bin/codegraph.ts` | read-only opens on query commands; `callers` file-line fix; `affected` test detection | take upstream's bodies, re-add `{ readOnly: true }` and the callers line fix | (LOCALIZED row in §4a) | **MISSED** — 4 hunks; upstream rewrote callers/callees/impact/affected |
+| `src/mcp/tools.ts` | exact-file pin, Flow call-site label, Grove ephemeral dataflow | take upstream's structure, re-port the fork blocks; the pin's token rule now lives in `src/graph/named-symbol-flow.ts` | — | **MISSED** — 9 hunks; the largest conflict of the sync |
+| `src/search/query-utils.ts` | test-path predicate | take upstream (`isTestPath` = the fork's `isStrictTestFile`) | — | **MISSED** — 1 hunk; fork change now upstream |
+| `src/extraction/extraction-version.ts` | both sides bump the integer | take a value strictly above both | — | **MISSED** — 1 hunk; set to 28 (fork 26, upstream 27) |
+| `.gitignore` | fork-local ignores vs upstream's | union | **MISSED** — was not in the table | auto-merged |
+| `CHANGELOG.md` | `[Unreleased]` entries | **not a plain union** — see the trap below | correct (2 hunks) | auto-merged; trap did not fire (fork bullets stayed under `[Unreleased]`) |
+| `package.json` / lock | new deps (rare — grammars ship as checked-in `.wasm`) | union `package.json`, then `npm install` to regenerate the lock; never hand-edit the lock | no conflict | no conflict; upstream added a `ui` workspace + devDeps, `npm ci` sufficed |
+| `AGENTS.md` / `CLAUDE.md` | doc drift | fork-specific sections are ours; upstream edits to shared how-codegraph-works content win | no conflict | **FALSIFIED** — 10 + 2 hunks: upstream made `AGENTS.md` canonical and `CLAUDE.md` an `@AGENTS.md` wrapper; resolved to the fork's byte-identical rule (fork header + upstream `AGENTS.md` body + managed section, in both) |
+| fork CRLF edits to upstream tests | `explore-factory-closure`, `explore-oversize-member` | take upstream once it ships its own Windows fix | — | **MISSED** — 1 hunk each; upstream #2053 superseded the fork edit |
 
 Read the verdict column as a lesson, not a scoreboard: **the four registry
 hotspots the table was built around are the ones that did NOT conflict, and the
@@ -254,6 +260,7 @@ easy case, not the representative one.
 |---|---|---|---|
 | 2026-07-06 | 12 (new-language work) | `CHANGELOG.md`, `grammars.ts` (2 hunks), `types.ts` | all pure unions |
 | 2026-07-27 | 124 (**extraction engine replaced**) | `CHANGELOG.md` (2 hunks), `.gitignore`, `src/db/index.ts`, `src/db/sqlite-adapter.ts` | one real behavioral decision; see below |
+| 2026-10-01 | 233 (tag `v1.6.1`; resolution + indexing changes, schema 9→11, `named-symbol-flow` extraction, docs restructure) | 11 files / 36 hunks: `AGENTS.md` (10), `src/mcp/tools.ts` (9), `src/bin/codegraph.ts` (4), `src/index.ts` (3), `CLAUDE.md`, `src/db/index.ts`, `src/db/sqlite-adapter.ts` (2 each), `extraction-version.ts`, `query-utils.ts`, two explore tests (1 each) | every conflict in shared logic or docs the fork edits, none in a registry or fork-only file; upstream superseded three fork changes (read-only open, test-path predicate, CRLF tests); §4a deletions fell 92 → 74 |
 
 The 2026-07-27 sync took upstream 1.5.0, which swapped extraction from wasm
 tree-sitter to **native Rust kernel walkers** (C# and Python among them —
@@ -287,6 +294,20 @@ to a stale `nodes_fts` (search recall only — `nodes`/`edges` are untouched)
 until something opens the project writable. **No existing test covers
 read-only open against an unhealed index**, so a green suite would not have
 caught this. If you touch `src/db/`, keep that guard.
+
+**1.6.1 addendum (2026-10-01) — "upstream has not superseded it" is now
+FALSIFIED for most of d601654.** Upstream 1.6.1 implements read-only opens
+natively: `DatabaseConnection.open(dbPath, { readOnly })` threads the flag into
+`createDatabase`, `configureConnection(db, readOnly)` skips `journal_mode = WAL`,
+and a read-only open returns before migrations, bulk-load heals and WAL
+maintenance (#1963) — serving readers across schema versions instead of the
+fork's old "requires migration" throw. `readOnly` is stored on the connection
+and `CodeGraph` reads it from there. The merge took all of that. **What the
+fork still owns:** the `mode=ro&immutable=1` retry when a read-only open fails
+because sidecars/locks are unavailable (`isReadOnlyOpenFailure` →
+`openConfigured(…, immutable = true)`), close-on-error in `openConfigured`, and
+`{ readOnly: true }` on the CLI query commands. The heal guard is now upstream's
+early return; the regression test still covers it.
 
 ### 5. Validate — build, tests, downstream smoke
 
@@ -398,7 +419,7 @@ npm test
   `getKernel()` returns `null` and everything silently falls back to the wasm
   engine, because prebuilt `.node` binaries ship only in release bundles.
   **A source-build validation therefore does not test the kernel walkers at
-  all** — the risk is deferred to whenever Kyle next installs from a release.
+  all** — the risk is deferred to whenever the user next installs from a release.
   To actually close it, build and stage the kernel, then run upstream's own
   parity harness:
 

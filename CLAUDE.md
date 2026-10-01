@@ -6,7 +6,7 @@
 
 ## What this fork is
 
-Kyle's private fork of `colbymchenry/codegraph`. It exists for the fork-local **framework
+The user's private fork of `colbymchenry/codegraph`. It exists for the fork-local **framework
 resolvers** — Blender Python and Unity (`src/resolution/frameworks/blender.ts`, `unity.ts`,
 `unity-assets.ts`, `unity-uxml.ts`, plus their invocation tables). Updating from upstream:
 follow **`FORK-MAINTENANCE.md`** (repo root) — check divergence first; **merge, never rebase**;
@@ -19,7 +19,7 @@ never push/PR/tag upstream.
 - **Single-writer git; scoped commits.** `git add <paths>` — **never `git add -A`**. One agent is
   the sole git actor for this repo at a time.
 - **Fork-only. NEVER push/PR/issue to upstream `colbymchenry/*` or any public repo.**
-  `git push origin` only. Public-repo PRs are forbidden by default unless Kyle initiates that
+  `git push origin` only. Public-repo PRs are forbidden by default unless the user initiates that
   exact request in the same turn.
 - **TDD** — no production code without a failing test first (red→green). `__tests__/blender.test.ts`
   is the harness pattern to copy for resolver work.
@@ -28,7 +28,7 @@ never push/PR/tag upstream.
   moved it to `docs/AGENTS.md` — plus
   `docs/design/dynamic-dispatch-coverage-playbook.md`. A/B eval arms run **Sonnet
   `--effort high`** (codegraph's deliberate floor-model rule — do not raise it).
-- **Merge/ship is Kyle-gated.** Report the outcome and what you applied; Kyle calls the merge.
+- **Merge/ship is gated on the user.** Report the outcome and what you applied; the user calls the merge.
 - **`NodeKind`/`EdgeKind` are fixed strings** in `src/types.ts` — extractors and resolvers use
   them verbatim.
 
