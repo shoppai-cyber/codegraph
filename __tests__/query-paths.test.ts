@@ -175,6 +175,8 @@ describe('extractQueryPaths — resolution and stripping', () => {
       strippedQuery: q,
       pinnedFiles: [],
       unresolvedPathSpans: [],
+      lineAnchors: [],
+      setAsideMatches: [],
     });
   });
 
