@@ -21,4 +21,7 @@
  * turns the re-index hint into noise — keep it honest (see CLAUDE.md, "Honesty
  * in the product is load-bearing").
  */
-export const EXTRACTION_VERSION = 26;
+// Fork merge of upstream v1.6.1: fork 1.6.0 line wrote 26 (Grove resolver),
+// upstream 1.6.1 wrote 27. 28 is strictly above both, so an index from
+// either parent is reported stale and re-indexed with the merged extractor.
+export const EXTRACTION_VERSION = 28;

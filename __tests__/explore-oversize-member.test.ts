@@ -157,10 +157,10 @@ describe('CG-30 — an oversize cluster member is bounded, not unbounded', () =>
     });
 
     it('cuts on whole lines — a body is never sliced mid-line', () => {
-      const source = fs.readFileSync(path.join(testDir, GIANT), 'utf-8').split('\n');
+      const source = fs.readFileSync(path.join(testDir, GIANT), 'utf-8').split(/\r?\n/);
       const numbered = response
-        .split('\n')
-        .map((l) => /^(\d+)\t([^\n]*)$/.exec(l))
+        .split(/\r?\n/)
+        .map((l) => /^(\d+)\t(.*)$/.exec(l))
         .filter((m): m is RegExpExecArray => m !== null)
         .filter((m) => Number(m[1]) >= 1 && Number(m[1]) <= source.length);
       const matching = numbered.filter((m) => source[Number(m[1]) - 1] === m[2]);

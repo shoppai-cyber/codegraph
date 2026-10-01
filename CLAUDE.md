@@ -24,7 +24,8 @@ never push/PR/tag upstream.
 - **TDD** — no production code without a failing test first (red→green). `__tests__/blender.test.ts`
   is the harness pattern to copy for resolver work.
 - **Follow codegraph's OWN required validation methodology** for any new framework: the upstream
-  guide's §"Validation methodology (REQUIRED for every new language/framework)" below, plus
+  guide's §"Validation methodology (REQUIRED for every new language/framework)" — upstream 1.6.1
+  moved it to `docs/AGENTS.md` — plus
   `docs/design/dynamic-dispatch-coverage-playbook.md`. A/B eval arms run **Sonnet
   `--effort high`** (codegraph's deliberate floor-model rule — do not raise it).
 - **Merge/ship is Kyle-gated.** Report the outcome and what you applied; Kyle calls the merge.
@@ -75,6 +76,8 @@ works: build/test, architecture, the REQUIRED validation methodology, releases, 
 Sections describing the maintainer's environment (macOS dev machine, Parallels Windows VM,
 release credentials) describe **upstream's** setup, not this machine.
 
+**Codex size note:** root `AGENTS.md` is intentionally kept near ~35 KiB (critical build/test/arch/retrieval rules retained). Longer validation methodology + the Excalidraw worked example live in `docs/AGENTS.md`. This environment sets `project_doc_max_bytes = 49152` so root (and root+`docs/` when cwd is under `docs/`) are not silently truncated at the 32 KiB default.
+
 ## Project Overview
 
 CodeGraph is a local-first code intelligence library + CLI + MCP server. It parses any supported codebase with tree-sitter, stores symbols/edges/files in SQLite (FTS5), and exposes a knowledge graph to AI agents (Claude Code, Cursor, Codex CLI, opencode) over MCP. Per-project data lives in `.codegraph/`. Extraction is deterministic — derived from AST, not LLM-summarized.
@@ -84,7 +87,8 @@ Distributed as `@colbymchenry/codegraph` on npm; same binary serves as installer
 ## Build, Test, Run
 
 ```bash
-npm run build           # tsc + copy schema.sql and *.wasm into dist/; chmods dist/bin/codegraph.js
+npm run build           # tsc + copy schema.sql and *.wasm + build the viewer into dist/; chmods dist/bin/codegraph.js
+npm run build:lib       # the viewer's components as @colbymchenry/codegraph-ui (ui/dist) — NOT part of `build`
 npm run dev             # tsc --watch
 npm run clean           # rm -rf dist
 
@@ -101,6 +105,29 @@ npx vitest run __tests__/extraction.test.ts -t "TypeScript"
 ```
 
 `copy-assets` (called from `build`) copies `src/db/schema.sql` and all `src/extraction/wasm/*.wasm` files into `dist/`. **Any new SQL or grammar wasm must be copied or it won't ship.**
+
+One other build step writes into `dist/` and is subject to the same rule: `build:ui` builds the
+browser viewer into `dist/viewer/` (never `dist/ui/` — that's the terminal ui).
+`scripts/check-ui-build.mjs` asserts both `dist/viewer/` and the copied grammars in
+`dist/extraction/wasm/` after every build and inside every release archive — the viewer's syntax
+highlighting reads a file with the same grammar the engine indexed it with, so a missing wasm is an
+unhighlighted screen as well as an extraction gap.
+
+`npm run build:lib` is separate and does NOT run as part of `npm run build`: it compiles the same
+`ui/src` tree a second way, with `svelte-package`, into `ui/dist` — the `@colbymchenry/codegraph-ui`
+component library the Pro app imports (task CG-61). `scripts/check-ui-package.mjs` then prunes the
+standalone app's shell out of it, resolves the extensionless import specifiers `svelte-package`
+leaves behind, and asserts the seam: nothing outside `lib/adapter.js` may reach the network. The
+package is **prepared, not published** — `ui/package.json` carries `"private": true` deliberately,
+and `scripts/pack-npm.sh` only packs a tarball when `CODEGRAPH_PACK_UI=1`.
+
+Tests run as **two vitest projects** (`vitest.workspace.mts`): `engine` (node) and `ui` (jsdom, the
+Svelte plugin, `resolve.conditions: ['browser']`) for the single `__tests__/ui-package.test.ts`.
+`npm test` still runs both. The split is not cosmetic — `browser` is a package-resolution
+condition, and applied globally it hands the engine's suites the browser builds of
+`web-tree-sitter` and friends. The root config (`vitest.config.mts`, `.mts` because the plugin is
+ESM-only and the repo is CJS) is the shared base; note that a workspace project **concatenates**
+the base's `include` with its own, which is why the `ui` project does not `extends` it.
 
 Node engines: `>=20.0.0 <25.0.0`. There is a hard exit on Node 25.x and below 20 (see `src/bin/node-version-check.ts`).
 
@@ -125,8 +152,9 @@ The public API surface is `src/index.ts` — the `CodeGraph` class wires all the
 - `src/index.ts` — `CodeGraph` class: `init`/`open`/`close`, `indexAll`, `sync`, `searchNodes`, `getCallers`/`getCallees`, `getImpactRadius`, `buildContext`, `watch`/`unwatch`.
 - `src/db/` — `DatabaseConnection`, `QueryBuilder` (prepared statements), `schema.sql`, `sqlite-adapter.ts`. Backed by Node's built-in **`node:sqlite`** (`DatabaseSync`) — real SQLite with WAL + FTS5, exposed through a thin better-sqlite3-shaped adapter. The bundled runtime always ships Node ≥22.5, so `node:sqlite` is always available: **no native build step and no wasm fallback**. (Running from source needs Node ≥22.5.) `codegraph status` reports the live backend (`node-sqlite`, the sole backend).
 - `src/extraction/` — `ExtractionOrchestrator`, tree-sitter wrappers, per-language extractors under `languages/` (one file per language), plus standalone extractors for non-tree-sitter formats (`svelte-extractor.ts`, `vue-extractor.ts`, `liquid-extractor.ts`, `dfm-extractor.ts` for Delphi). `parse-worker.ts` runs heavy parsing off the main thread.
-- `src/resolution/` — `ReferenceResolver` orchestrates `import-resolver.ts` (with `path-aliases.ts` for tsconfig path aliases + cargo workspace member globs), `name-matcher.ts`, and `frameworks/` (Express, Laravel, Rails, FastAPI, Django, Flask, Spring, Gin, Axum, ASP.NET, Vapor, React Router, SvelteKit, Vue/Nuxt, Cargo workspaces). Frameworks emit `route` nodes and `references` edges.
-- `src/graph/` — `GraphTraverser` (BFS/DFS, impact radius, path finding) and `GraphQueryManager` (high-level queries).
+- `src/resolution/` — `ReferenceResolver` orchestrates `import-resolver.ts` (with `path-aliases.ts` for tsconfig path aliases + cargo workspace member globs), `name-matcher.ts`, and `frameworks/` (Express, Laravel, Rails, FastAPI, Django, Flask, Spring, Gin, Axum, ASP.NET, Vapor, React Router, Next.js — `nextjs.ts`: pages and `route.ts` handlers from files, `router.push` / `redirect` / `NextResponse.redirect` as `navigates` edges, with `next-router-synthesizer.ts` for `<Link href>` — Expo Router, SvelteKit, Vue/Nuxt, Cargo workspaces). Frameworks emit `route` nodes and `references` edges. `callback-synthesizer.ts` holds the whole-graph synthesis passes (`SYNTH_PASSES`, merged in registry order — first-seen wins a duplicate pair) with the language gates; `tier-synthesizer.ts` is the cross-tier pass (a client's literal `fetch`/`axios` path onto its own route, a queue job onto its consumer, a bus / socket event onto its handler — `channel`, `tier`, `registeredAt` on every edge; registered before the in-process emitter pass so its more specific edge wins); `synth-utils.ts` has the helpers they share (`enclosingFn`, `enclosingValue`, `makeLineAt`). Express's `postExtract` composes `app.use('/prefix', router)` mounts onto a mounted file's route names, idempotently (the original path stays in `qualifiedName`).
+- `src/graph/` — `GraphTraverser` (BFS/DFS, impact radius, path finding) and `GraphQueryManager` (high-level queries), plus the shared query-time derivations more than one surface renders: `named-symbol-flow.ts` (the one path finder, behind `codegraph_explore`'s Flow section and the viewer's Flow strip), `dynamic-boundary-report.ts` (where the graph stops), `type-hierarchy.ts` (ancestors/subtypes and the implementation count explore prints and the viewer draws),
+  `dead-code.ts` (unreferenced symbols, and every reason a candidate is NOT claimed). A derivation that two callers render must live here, not in `ToolHandler` — two derivations eventually disagree.
 - `src/context/` — `ContextBuilder` + formatter for markdown/JSON output.
 - `src/search/` — full-text query parser and helpers for FTS5.
 - `src/sync/` — `FileWatcher` (native FSEvents/inotify/RDCW) with debounce + filter, and git-hook helpers.
@@ -134,6 +162,8 @@ The public API surface is `src/index.ts` — the `CodeGraph` class wires all the
 - `src/installer/` — see below.
 - `src/bin/codegraph.ts` — CLI (commander). Subcommands: `install`, `init`, `uninit`, `index`, `sync`, `status`, `query`, `files`, `context`, `affected`, `serve --mcp`.
 - `src/ui/` — terminal UI (shimmer progress, worker).
+- `src/ui-server/` -- read-only JSON API for the `codegraph ui` browser viewer (`api/`: `node`, `flow`, `map`, `screens`, `steps`, `deadcode`, `trails`, `program`, ...) plus static server; Svelte viewer lives in `ui/` (see `docs/design/codegraph-ui-design-spec.md`). `screens`/`steps`/`program` share one fold (`via`/`when` via `graph/branch-guards.ts`); `api/effects.ts` curates calls that leave the index; `api/route-roots.ts` names where a route's code starts. Derivations rendered by more than one surface belong in `src/graph/`, not `ToolHandler`.
+  **Not released yet:** `codegraph ui` / `web` are refused (and hidden from `--help`) unless `CODEGRAPH_UI=1` is set — `src/bin/viewer-gate.ts`. Viewer changelog entries wait in `docs/viewer-launch-changelog.md`, not under `[Unreleased]`. At launch: delete the gate, move those entries back, drop the "not released yet" notes from `site/`.
 
 ### NodeKind / EdgeKind
 
@@ -150,7 +180,7 @@ Defined in `src/types.ts`. Both extractors and resolvers must use these exact st
 - `targets/types.ts` defines the `AgentTarget` interface — adding a 5th agent (Continue, Zed, Windsurf…) is **one new file in `targets/` + one entry in `registry.ts`**. Each target owns its config-file location and MCP-server JSON/TOML/JSONC writing. (Targets no longer write an instructions file — see below.)
 - Current targets: `claude.ts`, `cursor.ts`, `codex.ts`, `opencode.ts`.
 - `targets/toml.ts` is a hand-rolled TOML serializer scoped to `[mcp_servers.codegraph]` (used by Codex). Sibling tables and `[[array_of_tables]]` are preserved verbatim. No new dependency.
-- opencode reads `opencode.jsonc` by default; the installer prefers existing `.jsonc`, falls back to `.json`, and creates `.jsonc` for greenfield installs. Edits are surgical via `jsonc-parser` so user comments and formatting survive install/re-install/uninstall round-trips.
+- opencode reads `opencode.jsonc` by default; the installer prefers existing `.jsonc`, falls back to `.json`, and creates `.jsonc` for greenfield installs. Edits are surgical via `jsonc-parser` so user comments and formatting survive install/re-install/uninstall round-trips. The MCP entry is OpenCode 2's native `mcp.servers.codegraph` with `disabled: false` and `codemode: false` (so `codegraph_explore` stays on the native tool list); a pre-#1698 `mcp.codegraph` + `enabled` entry is migrated on re-install and removed by uninstall.
 - `instructions-template.ts` no longer holds an instructions body — it exports only the `<!-- CODEGRAPH_START -->`/`<!-- CODEGRAPH_END -->` markers. The installer **stopped writing** a `## CodeGraph` block into each agent's instructions file (`CLAUDE.md` / `~/.codex/AGENTS.md` / `~/.config/opencode/AGENTS.md` / `~/.gemini/GEMINI.md` / `.cursor/rules/codegraph.mdc` / Kiro steering doc) because it duplicated the MCP `initialize` instructions verbatim (issue #529). Each target's `install` (self-heal on upgrade) and `uninstall` use the markers to **strip** a block a previous install left behind. `server-instructions.ts` is the single source of truth for agent-facing guidance.
 - All installer changes need matching coverage in `__tests__/installer-targets.test.ts` — there are ~47 parameterized contract tests covering install idempotency, sibling preservation, uninstall reverses install, byte-equal re-runs returning `unchanged`, and partial-state recovery for Codex.
 
@@ -200,39 +230,21 @@ Two functions in `src/mcp/tools.ts` scale explore with indexed file count. This 
 
 ### Dynamic-dispatch coverage — the flow must EXIST in the graph end-to-end
 
-Static tree-sitter extraction misses computed/indirect calls, so flows break at dynamic dispatch and the agent reads to reconstruct them. Synthesizers/resolvers bridge these so `codegraph_explore` connects them end-to-end (`src/resolution/callback-synthesizer.ts`, `src/resolution/frameworks/`). Channels today: callback/observer, EventEmitter, **React re-render** (`setState`→`render`), **JSX child** (`render`→child component), django ORM descriptor. All synthesized edges are `provenance:'heuristic'` with `metadata.synthesizedBy` + `registeredAt` (the wiring site), surfaced inline in `codegraph_explore`'s Flow section and the `codegraph_node` trail.
+Static tree-sitter extraction misses computed/indirect calls, so flows break at dynamic dispatch and the agent reads to reconstruct them. Synthesizers/resolvers bridge these so `codegraph_explore` connects them end-to-end (`src/resolution/callback-synthesizer.ts`, `src/resolution/frameworks/`). Channels today: callback/observer, EventEmitter, **React re-render** (`setState`→`render`), **JSX child** (`render`→child component), **React Native native→JS events** (`sendEvent(withName:)` / JVM `emit` → the `addListener` handler, named or inline, `rn-event-channel`), django ORM descriptor. The JS→native direction is a *resolver* (`frameworks/react-native.ts`: `RCT_EXPORT_METHOD`, `RCT_EXTERN_MODULE` Swift shims, TurboModules), which trusts receiver evidence — an alias bound to `NativeModules.X` — over the import resolver. All synthesized edges are `provenance:'heuristic'` with `metadata.synthesizedBy` + `registeredAt` (the wiring site), surfaced inline in `codegraph_explore`'s Flow section and the `codegraph_node` trail.
 
 **Principle: partial coverage is WORSE than none.** Bridging one boundary but not the next reveals a hop the agent then drills + reads to finish. Measured on excalidraw: react-render alone *raised* reads to 5–7; only completing the flow (adding the jsx-child hop) dropped it to 0–1. **Always close the flow end-to-end and re-measure** — never ship a half-bridged flow.
 
-### Validation methodology (REQUIRED for every new language/framework)
 
-For each **language × framework**, validate on **small, medium, and large** real repos with **≥3 different flow prompts** each:
+### Validation methodology & worked examples
 
-1. **Pick the canonical flow** for the framework ("how does X reach Y": state→render, request→handler→view, query→SQL, action→reducer→store…).
-2. **Deterministic probes** (`scripts/agent-eval/probe-{node,explore}.mjs` against the built `dist/`): `codegraph_explore` with the flow's symbol names connects from→to end-to-end with no break (its Flow section shows the path); **no node explosion** (`select count(*) from nodes` stable before/after re-index); synthesized-edge **precision** spot-check (`select … where provenance='heuristic'`).
-3. **Agent A/B** (`scripts/agent-eval/run-all.sh <repo> "<Q>"`): with vs without codegraph, **≥2 runs/arm** (run-to-run variance is large — never conclude from n=1). Record **duration, total tool calls, Read, Grep**. Optional forced-Read-0 sufficiency proof via the block-read hook (`scripts/agent-eval/hook-settings.json`).
-   - **Every run also reports three feedback metrics** — residual context occupancy, explore sufficiency (what the agent did NEXT after each explore), and allocation efficiency (share of returned bytes the answer cited) — under each run, plus a side-by-side arm table (`compare-arms.mjs`). Entry point: `docs/benchmarks/agent-eval-feedback-metrics.md`. Reading them: `Read a file we returned` is an allocation miss, `Read a file we did NOT return`/`Grep` is recall; allocation efficiency is **relative** (attribution is by citation) so it is only valid between builds on the same question; occupancy *shares* are Claude Code / 200k and don't transfer to another host — the arm ratio does.
-   - **The `codegraph` CLI is blocked in every arm** (`no-cli-shim.sh`: sanitized PATH + a PreToolUse hook, shared by both harnesses). Without it 14 of 15 without-arm runs in one 7-repo pass reached codegraph through Bash. Check the contamination row before believing any number: `CLI calls that RETURNED output` > 0 invalidates the run (in a new-vs-baseline A/B it silently drops calls from all three metrics, since a CLI explore is not a tool call).
-   - **Model policy — every A/B arm runs Claude with `--model sonnet --effort high`. Always. Never Opus/Fable.** All `scripts/agent-eval/*.sh` default to this (`MODEL`/`EFFORT` env override exists — don't raise it without an explicit reason from the maintainer). Two reasons, and the second matters more than cost: (a) Sonnet doesn't burn tokens; (b) **Sonnet is the deliberate floor model** — codegraph's real users attach it to whatever agent they already run (Cursor Composer, Gemini, etc.), so we validate on a "dumber" model on purpose: a stronger model's tool-use covers up the salience/sufficiency problems a weaker one exposes. An affordance that lands on Sonnet generalizes up to every host; one that only works on Opus/Fable doesn't generalize down to the agents most users actually have. Both arms always use the same model.
-   - **MCP attach is a startup-latency issue, not a hard block.** On a multi-step task the agent dives into Read/grep before codegraph finishes its ~2-3s startup (worse when the eval is itself run nested inside a Claude session, under CPU contention), so it runs with no codegraph. Fix: **pre-warm a persistent daemon** for the target (`CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS` high; spawn `serve --mcp --path <target> </dev/null &`; wait for `.codegraph/daemon.sock`) **and skip the startup re-exec** (`CODEGRAPH_WASM_RELAUNCHED=1`) so claude connects before the agent's first turn. Don't trust claude's `init` snapshot — it can read `status:"pending"` / 0 tools even when it then connects; judge by actual codegraph usage in `parse-run.mjs`'s `by type`. To isolate a change — **new-build vs baseline-build, both codegraph-on** (vs run-all.sh's with-vs-without) — use `scripts/agent-eval/ab-new-vs-baseline.sh <indexed-repo> "<task>" [baseline-ref]` (it bakes in the pre-warm).
-4. **Pass bar:** a normal flow question reaches **~0 Read/Grep within the repo's explore-call budget**, runs **faster** than without-codegraph, and shows **no regression on a control repo**. Record the numbers in `docs/design/dynamic-dispatch-coverage-playbook.md` (the coverage matrix).
+**Required** for every new language/framework: validate on small/medium/large real repos with >=3 flow prompts; deterministic probes (`scripts/agent-eval/probe-*.mjs`) then agent A/B (`scripts/agent-eval/run-all.sh` / `ab-new-vs-baseline.sh`). Pass bar: ~0 Read/Grep within the explore-call budget, faster than without-codegraph, no control-repo regression.
 
-Full playbook + per-mechanism design: `docs/design/dynamic-dispatch-coverage-playbook.md` and `docs/design/callback-edge-synthesis.md`.
+Full methodology (feedback metrics, CLI contamination guard, Sonnet/`--effort high` model policy, daemon pre-warm), the Excalidraw worked example, and coverage matrix live in:
+- `docs/AGENTS.md` (nested; also loaded when cwd is under `docs/`)
+- `docs/design/dynamic-dispatch-coverage-playbook.md`
+- `docs/design/callback-edge-synthesis.md`
+- `docs/benchmarks/call-sequence-analysis.md` / `docs/benchmarks/agent-eval-feedback-metrics.md`
 
-### Worked example — Excalidraw (TS/React, medium, 643 files)
-
-The template to replicate per language/framework. Question: *"how does updating an element re-render the canvas on screen?"* (the full flow crosses three React boundaries: observer callback, `setState`→`render`, and JSX child).
-
-| Stage | duration | Read | Grep | codegraph |
-|---|---|---|---|---|
-| Without codegraph | 115–139s | 9–10 | 10–11 | 0 |
-| Broken (explore-budget regression) | 131–139s | 5–10 | 3–5 | 6–14 |
-| Fixed (budget + msgs + synthesis) | 64–112s | 0–2 | 2–4 | 3–**10** |
-| + trace-first steering | **51–74s** | **0–2** | 0–4 | **3–4** |
-
-n=4 unhooked runs/stage, same prompt. After steering flow questions to `codegraph_trace` first: **best run 0 Read / 0 Grep / 3 codegraph / 51s**; **2 of 4 fully clean** (0 Read, 0 Grep). Steering eliminated the over-drill variance — call count tightened from 3–10 to 3–4, trace adoption went 3/4 → 4/4, and the `search`+`callers` path-reconstruction floundering dropped to 0. Run-to-run variance is still real; report the range, never a single run. **Residual reads/greps are all the nonce data-flow** (`canvasNonce` — a local prop with no graph edges); that's the def-use/data-flow frontier, left deliberately uncovered (tracking every local would explode the graph). Validated: `trace(mutateElement, renderStaticScene)` connects in **6 hops** across all three boundaries (`mutateElement → triggerUpdate → [callback] triggerRender → [react-render] render → [jsx] StaticCanvas → renderStaticScene`), each hop showing inline source + the wiring site; node count stable at 9,289; 1 callback + 46 react-render + 280 jsx-render synthesized edges (no explosion, precision-checked).
-
-## Tests
 
 Tests live in `__tests__/` and mirror the module they cover. Notable ones beyond the obvious:
 
@@ -273,7 +285,7 @@ For any Windows-specific PR, bug, or implementation, validate it on the real Win
 - Clone fresh into a **Windows-local** path (`C:\dev\codegraph`) and `npm ci` there — never run npm against the shared Mac repo, since `esbuild`/`rollup` ship platform-specific binaries.
 - Guest toolchain (winget): Node LTS, Git, and the **VC++ ARM64 redistributable** (required by `@rollup/rollup-win32-arm64-msvc`, which vitest pulls in).
 - Fetch a contributor PR head straight from their fork to dodge `pull/<n>/head` lag: `git fetch <fork-url> <branch>` then `git checkout -f FETCH_HEAD`.
-- Known pre-existing Windows failures (they reproduce on `main`, unrelated to your change — confirm against `origin/main` before blaming your PR, and don't let them mask new regressions): `security.test.ts > Session marker symlink resistance > does not follow a pre-planted symlink` (symlink creation needs privileges on Windows); and the `mcp-initialize.test.ts` / `mcp-roots.test.ts` suites, which fail in `afterEach` with `EPERM` removing the temp dir because a spawned `serve --mcp` (its `--liftoff-only` re-exec grandchild) still holds the cwd / SQLite file open — a Windows file-locking quirk, not a logic bug.
+- Windows baseline: as of #2053 the full suite passes on the Windows 11 (ARM64) VM. The only expected exception is `security.test.ts > Session marker symlink resistance > does not follow a pre-planted symlink`, which needs symlink privileges (Developer Mode) — confirm any other failure against `origin/main` before blaming your PR. The former `mcp-initialize.test.ts` / `mcp-roots.test.ts` `EPERM` teardown failures came from tests spawning `serve --mcp` without the runtime flags (its `--liftoff-only` re-exec grandchild kept the cwd / SQLite file open); spawn it with `WASM_RUNTIME_FLAGS` and await the child's exit before removing the temp dir. Windows checkouts may be CRLF — split source lines on `/\r?\n/` in tests.
 
 ## Releases
 
@@ -336,6 +348,7 @@ publish actions on shared state. Write the files, hand the user the commands.
 
 - The `0.7.x` line is in active multi-agent rollout. Any change to `src/installer/` (especially `targets/`) needs corresponding test coverage and a CHANGELOG entry — installer regressions break every new install silently.
 - When changing what the MCP tools do or how agents should use them, edit `src/mcp/server-instructions.ts` — it is the **single source of truth** for agent-facing tool guidance (issue #529). The installer no longer writes a duplicate instructions block into `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` / `.cursor/rules/codegraph.mdc` / Kiro steering, so there's nothing to keep in sync anymore. (The repo's own checked-in `.cursor/rules/codegraph.mdc` is dogfooding config — update it too if you use Cursor on this repo, but it ships nowhere.)
+- **Before adding or extending a router, a web framework, or a language's `WHEN` rules, read `docs/design/framework-coverage.md`.** It is the standing answer to "what is supported and what is left" across the three axes (route nodes → Entry points, `navigates` edges → Screens, branch-guard rules → the `WHEN` labels), with what each remaining item needs, the traps that have already cost debugging time, and the queries to re-verify it. Update it in the same change that moves a row.
 - CodeGraph provides **code context**, not product requirements. For new features, ask the user about UX, edge cases, and acceptance criteria — the graph won't tell you.
 - **When the user references issues, PR comments, or external reports, anchor them to a date and version before drawing conclusions.** Check the comment's `createdAt` against:
   - The **last released version** — `grep -m1 '^## \[' CHANGELOG.md` shows the top-of-file version (older releases follow). A comment dated before the latest `## [X.Y.Z] - YYYY-MM-DD` is reacting to *released* state — work that's only on `main` or on an unmerged branch doesn't apply.
