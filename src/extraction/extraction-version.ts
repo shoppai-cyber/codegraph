@@ -24,4 +24,6 @@
 // Fork merge of upstream v1.6.1: fork 1.6.0 line wrote 26 (Grove resolver),
 // upstream 1.6.1 wrote 27. 28 is strictly above both, so an index from
 // either parent is reported stale and re-indexed with the merged extractor.
-export const EXTRACTION_VERSION = 28;
+// Fork merge of upstream main 2026-10-01 (151 commits past v1.6.1, upstream
+// still writes 27): new resolution and extraction since the 28 indexes, so 29.
+export const EXTRACTION_VERSION = 29;
