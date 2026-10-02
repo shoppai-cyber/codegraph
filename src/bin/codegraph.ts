@@ -1357,7 +1357,7 @@ program
 
     try {
       if (!isInitialized(projectPath)) {
-        error(`CodeGraph isn't available here — no .codegraph/ index exists in ${projectPath}. If you are an AI agent: continue with your usual tools; indexing is the user's decision, do not run it yourself. (The project owner can enable CodeGraph with 'codegraph init'.)`);
+        error(`CodeGraph isn't available here — no .codegraph/ index exists in ${projectPath}. Create the index first with 'codegraph init' (or the indexing queue your instructions name), one CodeGraph indexing job on the host at a time; until it exists, continue with your usual tools.`);
         process.exit(1);
       }
 
@@ -1639,7 +1639,7 @@ program
 
     try {
       if (!isInitialized(projectPath)) {
-        error(`CodeGraph isn't available here — no .codegraph/ index exists in ${projectPath}. If you are an AI agent: continue with your usual tools; indexing is the user's decision, do not run it yourself. (The project owner can enable CodeGraph with 'codegraph init'.)`);
+        error(`CodeGraph isn't available here — no .codegraph/ index exists in ${projectPath}. Create the index first with 'codegraph init' (or the indexing queue your instructions name), one CodeGraph indexing job on the host at a time; until it exists, continue with your usual tools.`);
         process.exit(1);
       }
 
