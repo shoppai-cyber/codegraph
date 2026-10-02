@@ -1107,8 +1107,11 @@ describe.runIf(CodeGraph.isInitialized(path.resolve(__dirname, '..')))(
       expect(res.status).toBe(200);
       const body = JSON.parse(res.body);
 
-      expect(body.counts.fanIn).toBeGreaterThan(300);
-      expect(body.counts.hub).toBe(true);
+      // Fork divergence: the fork's resolution links only the real
+      // `<cache>.get(` sites (26 in src/resolution today), not the 300+
+      // same-named Map/cache `get` calls upstream still attributes here, so
+      // the count is held to those sites and the hub flag is not asserted.
+      expect(body.counts.fanIn).toBeGreaterThanOrEqual(20);
       // Grouped by calling symbol, so the row count is the distinct-caller
       // count, never the edge count.
       expect(body.incoming.items).toHaveLength(body.incoming.shown);

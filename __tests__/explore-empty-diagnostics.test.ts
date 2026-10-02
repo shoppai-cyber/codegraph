@@ -62,8 +62,11 @@ describe('empty explore diagnostics (#1904)', () => {
   it('keeps unresolved paths separate from word diagnostics', async () => {
     await index(registration);
     const text = await explore('missing/phantom.py signing');
-    expect(text).toContain('no indexed file uniquely matches `missing/phantom.py`');
-    expect(text).toMatch(/No lexical matches[^\n]*`signing`/);
+    // Fork divergence: when every explicitly named file is unavailable, explore
+    // fails closed before the word pipeline (explore-path-pinning.test.ts), so
+    // the path is reported and no word diagnostics follow.
+    expect(text).toContain('No indexed file uniquely matches `missing/phantom.py`');
+    expect(text).toContain('every explicitly named file is unavailable');
     expect(text).not.toMatch(/No lexical matches[^\n]*`phantom`/);
   });
 
