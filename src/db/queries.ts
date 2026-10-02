@@ -1204,7 +1204,8 @@ export class QueryBuilder {
     if (!this.stmts.getRoutingManifest) {
       // Edge kind varies across framework resolvers: Spring/Rails/
       // Laravel/Drupal emit `references`, Express emits `calls`. Accept
-      // both — the semantic is the same (route → its handler).
+      // both — the semantic is the same (route → its handler). A screen in
+      // a Vue / Svelte / Astro app is served by a `component`.
       this.stmts.getRoutingManifest = this.db.prepare(`
         SELECT
           r.name AS url,
@@ -1220,7 +1221,7 @@ export class QueryBuilder {
         JOIN nodes h ON e.target = h.id
         WHERE r.kind = 'route'
           AND e.kind IN ('references', 'calls')
-          AND h.kind IN ('function', 'method', 'class', 'constant', 'variable')
+          AND h.kind IN ('function', 'method', 'class', 'constant', 'variable', 'component')
         ORDER BY r.file_path, r.start_line
         LIMIT ?
       `);
@@ -2197,7 +2198,11 @@ export class QueryBuilder {
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.db
         .prepare(
-          `SELECT target, COUNT(*) AS count FROM edges WHERE target IN (${placeholders}) GROUP BY target`
+          // A test's request onto a route (tier-synthesizer's `test-request`)
+          // is not a production caller: forty tests hitting one endpoint must
+          // not make it a hub the Steps walk refuses to enter.
+          `SELECT target, COUNT(*) AS count FROM edges WHERE target IN (${placeholders})
+             AND (metadata IS NULL OR metadata NOT LIKE '%"synthesizedBy":"test-request"%') GROUP BY target`
         )
         .all(...chunk) as Array<{ target: string; count: number }>;
       for (const row of rows) out.set(row.target, row.count);
