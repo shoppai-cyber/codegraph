@@ -1556,8 +1556,8 @@ const projectPathProperty: PropertySchema = {
 
 /**
  * EVERY codegraph tool is query-only: it reads the pre-built index and never
- * mutates the workspace (indexing is the user's explicit CLI call, never the
- * agent's). Advertising this read-only contract lets clients that gate on it run
+ * mutates the workspace (indexing is a separate CLI call, never an MCP
+ * tool). Advertising this read-only contract lets clients that gate on it run
  * the tools where a possibly-mutating tool would be blocked — most concretely,
  * Cursor's Ask mode, which rejects any MCP tool lacking `readOnlyHint: true`
  * (issue #1018). `idempotentHint`: a repeated query has no additional effect.
@@ -2240,8 +2240,8 @@ export class ToolHandler {
       throw new NotIndexedError(
         `The project at ${projectPath} isn't indexed with codegraph (no .codegraph/ directory found ` +
         'walking up from it), so codegraph cannot query it. Use your built-in tools (Read/Grep/Glob) ' +
-        "for that codebase instead, and don't call codegraph for it again this session. " +
-        "Indexing is the user's decision — they can run 'codegraph init' in that project to enable it."
+        "for that codebase until it is indexed. Create the index with 'codegraph init' (or the indexing " +
+        'queue your instructions name), one CodeGraph indexing job on the host at a time; a new index is picked up live.'
       );
     }
 
