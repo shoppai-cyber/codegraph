@@ -7,7 +7,8 @@ fork. No prior session context required — this document is self-contained.
 - **Upstream:** `colbymchenry/codegraph` (`upstream` remote, read-only)
 - **Fork-only surface:** framework resolvers + extractors (Unity engine
   liveness, FishNet, Unity asset-wiring YAML, Blender, CFML) plus their tests
-  and docs. See `AGENTS.md` for the active workstream.
+  and docs, and one scan fix (`src/extraction/git-ignored-paths.ts`). See
+  `AGENTS.md` for the active workstream.
 
 ## Standing rules (read before doing anything)
 
@@ -129,6 +130,7 @@ was wrong and doesn't say so is worse than no table:
 | `package.json` / lock | new deps (rare — grammars ship as checked-in `.wasm`) | union `package.json`, then `npm install` to regenerate the lock; never hand-edit the lock | no conflict | no conflict; upstream added a `ui` workspace + devDeps, `npm ci` sufficed |
 | `AGENTS.md` / `CLAUDE.md` | doc drift | fork-specific sections are ours; upstream edits to shared how-codegraph-works content win | no conflict | **FALSIFIED** — 10 + 2 hunks: upstream made `AGENTS.md` canonical and `CLAUDE.md` an `@AGENTS.md` wrapper; resolved to the fork's byte-identical rule (fork header + upstream `AGENTS.md` body + managed section, in both) |
 | fork CRLF edits to upstream tests | `explore-factory-closure`, `explore-oversize-member` | take upstream once it ships its own Windows fix | — | **MISSED** — 1 hunk each; upstream #2053 superseded the fork edit |
+| `src/extraction/index.ts` (`buildScopeIgnore`) | fork hook (2026-10-01): the root matcher is wrapped by `withGitIgnoredPaths` (fork-only `git-ignored-paths.ts`), so git-listed ignored paths are matched by exact lookup instead of one `ignore` pattern each | take upstream's body, re-apply the one-line wrap and the `Pick<Ignore, 'ignores'>` constructor type; drop both if upstream makes #1728's seeding cheap itself | — | — (added after the 1.6.1 sync) |
 
 Read the verdict column as a lesson, not a scoreboard: **the four registry
 hotspots the table was built around are the ones that did NOT conflict, and the

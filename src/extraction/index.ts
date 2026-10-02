@@ -32,6 +32,7 @@ import { isCodeGraphDataDir } from '../directory';
 import { logDebug, logWarn } from '../errors';
 import { validatePathWithinRoot, normalizePath } from '../utils';
 import ignore, { Ignore } from 'ignore';
+import { withGitIgnoredPaths } from './git-ignored-paths';
 import { detectFrameworks, getFrameworkResolver } from '../resolution/frameworks';
 import { declaredDependencies } from '../resolution/frameworks/package-deps';
 import type { ResolutionContext } from '../resolution/types';
@@ -815,7 +816,7 @@ export class ScopeIgnore {
   private embedded: Array<{ root: string; matcher: Ignore }>;
   private defaults: Ignore = defaultsOnlyIgnore();
   constructor(
-    private rootMatcher: Ignore,
+    private rootMatcher: Pick<Ignore, 'ignores'>,
     embedded: Array<{ root: string; matcher: Ignore }>,
     /**
      * Project `codegraph.json` `exclude` patterns (#999), matched against the
@@ -885,10 +886,8 @@ export function buildScopeIgnore(rootDir: string, embeddedRoots?: Iterable<strin
   // Root matcher already has defaults + root `.gitignore` + info/exclude +
   // core.excludesFile. Seed ignored-untracked directories from git so nested
   // `.gitignore` effects prune the watcher identically to the indexer (#1728).
-  const rootMatcher = buildDefaultIgnore(rootDir);
-  for (const dir of listGitIgnoredDirectories(rootDir)) {
-    rootMatcher.add(dir);
-  }
+  // Fork: literal entries are matched by exact prefix (git-ignored-paths.ts).
+  const rootMatcher = withGitIgnoredPaths(buildDefaultIgnore(rootDir), listGitIgnoredDirectories(rootDir));
   return new ScopeIgnore(
     rootMatcher,
     roots.map((root) => ({ root, matcher: buildDefaultIgnore(path.join(rootDir, root)) })),
