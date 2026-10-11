@@ -2187,6 +2187,10 @@ program
           console.error(chalk.dim('\n(Running it directly only does something when an MCP client drives it over stdin.)'));
           return;
         }
+        // Agents start one server per session; below-normal keeps them from
+        // competing with the user's own work (see serve-priority.ts).
+        const { lowerServePriority } = await import('./serve-priority');
+        lowerServePriority();
         // Start MCP server - it handles initialization lazily based on rootUri from client
         const { MCPServer } = await import('../mcp/index');
         const server = new MCPServer(projectPath);
